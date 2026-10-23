@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Administrar Proyecto</title>
+<link rel="icon" href="icons/icono-192.png">
+<link rel="stylesheet" href="css/app.css">
+<style>
+  body { overflow: auto; display: block; background: #f3f5f7; }
+  .pag { max-width: 760px; margin: 0 auto; padding: 16px; }
+  .tarjeta { background: #fff; border-radius: 14px; padding: 16px; margin-bottom: 14px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+  h1 { font-size: 22px; margin: 4px 0 12px; }
+  h2 { font-size: 18px; margin: 0 0 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  td, th { text-align: left; padding: 6px; border-bottom: 1px solid var(--borde); }
+  tr.sel td { background: #e3f0fb; }
+  .res { margin-top: 10px; font-weight: 600; }
+  .res.mal { color: var(--mal); }
+  .res.ok { color: var(--ok); }
+</style>
+</head>
+<body>
+<div class="pag">
+  <h1>Administrar proyecto · Recorrido de Obra</h1>
+
+  <div class="tarjeta">
+    <h2>1. Conexión</h2>
+    <p class="ayuda">Abre esta página con el <b>enlace de administración</b> (menú «Recorrido de obra» de la hoja de Google) o pega aquí sus datos.</p>
+    <label class="campo" for="url">Dirección del script (termina en /exec)</label>
+    <input id="url" type="text" placeholder="https://script.google.com/macros/s/…/exec">
+    <label class="campo" for="clave">Clave de administración</label>
+    <input id="clave" type="text">
+    <button class="btn primario" id="conectar" style="margin-top:10px">Conectar</button>
+    <div id="r-con" class="res"></div>
+  </div>
+
+  <div class="tarjeta">
+    <h2>2. Eje de la vía</h2>
+    <p class="ayuda">Sube el eje en <b>DXF</b> (una polilínea; en AutoCAD/Civil 3D: guardar como DXF) o en <b>CSV</b> con columnas E, N (y PROG si la tienes). Reemplaza el eje actual; la hoja guarda una copia del anterior.</p>
+    <input id="f-eje" type="file" accept=".dxf,.csv,.txt">
+    <div id="eje-lista"></div>
+    <div id="eje-op" class="oculto">
+      <label class="campo" for="eje-ini">Progresiva del inicio de la polilínea</label>
+      <input id="eje-ini" type="text" value="0+000">
+      <label style="display:block;margin-top:8px"><input type="checkbox" id="eje-inv"> Invertir sentido (la polilínea está dibujada desde el final)</label>
+      <div id="eje-res" class="caja" style="margin-top:10px"></div>
+      <button class="btn primario" id="eje-subir" style="margin-top:10px">Subir eje (reemplaza el actual)</button>
+    </div>
+    <div id="r-eje" class="res"></div>
+  </div>
+
+  <div class="tarjeta">
+    <h2>3. Elementos de obra y BM</h2>
+    <p class="ayuda">Lo habitual es editar la hoja <b>ELEMENTOS</b> directamente en Google Sheets: cambia una progresiva o agrega una fila, y la app del equipo se actualiza sola. Usa esta carga solo para reemplazar la tabla completa desde un CSV.</p>
+    <p class="ayuda">Columnas de ELEMENTOS: CODIGO, TIPO, PROG_INI, PROG_FIN, LADO (LI/LD), DESCRIPCION, ESTADO, OBS. Columnas de BM: CODIGO, E, N, PROG, DIST_EJE.</p>
+    <div class="fila">
+      <label class="btn crece" style="display:flex;align-items:center;justify-content:center">CSV de ELEMENTOS<input id="f-elem" type="file" accept=".csv" hidden></label>
+      <label class="btn crece" style="display:flex;align-items:center;justify-content:center">CSV de BM<input id="f-bm" type="file" accept=".csv" hidden></label>
+    </div>
+    <div id="r-tab" class="res"></div>
+  </div>
+
+  <div class="tarjeta">
+    <h2>4. Respaldo</h2>
+    <p class="ayuda">Descarga el proyecto como archivo .json. La app puede abrirlo sin conexión a la hoja (por ejemplo, para otra persona o como respaldo).</p>
+    <button class="btn" id="respaldo">Descargar archivo del proyecto</button>
+    <div id="r-resp" class="res"></div>
+  </div>
+</div>
+
+<script type="module">
+import { leerPolilineas, conProgresiva, leerCSV } from './js/dxf.js';
+import { leerEnlace } from './js/api.js';
+import { parseProg, fmtProg } from './js/geo.js';
+
+const $ = (s) => document.querySelector(s);
+const res = (id, txt, ok) => { const e = $(id); e.textContent = txt; e.className = 'res ' + (ok ? 'ok' : 'mal'); };
+const inv = leerEnlace(location.hash);
+if (inv) { $('#url').value = inv.url; $('#clave').value = inv.k; history.replaceState(null, '', location.pathname); }
+
+const get = async (a) => {
+  const r = await fetch(`${$('#url').value.trim()}?a=${a}&k=${encodeURIComponent($('#clave').value.trim())}`);
+  const j = await r.json(); if (j.error) throw new Error(j.error); return j;
+};
+const post = async (datos) => {
+  const r = await fetch($('#url').value.trim(), { method: 'POST', body: JSON.stringify({ k: $('#clave').value.trim(), ...datos }) });
+  const j = await r.json(); if (j.error) throw new Error(j.error); return j;
+};
+
+$('#conectar').onclick = async () => {
+  res('#r-con', 'Conectando…', true);
+  try {
+    await get('enlace'); // solo responde con la clave de administración
+    const p = await get('proyecto');
+    res('#r-con', `Conectado a «${p.config.NOMBRE}»: eje de ${p.eje.length} vértices, ${p.elementos.length} elementos, ${p.bm.length} BM.`, true);
+  } catch (e) { res('#r-con', 'No se pudo conectar: ' + e.message); }
+};
+if (inv) $('#conectar').click();
+
+let polis = [], elegida = null, ejeFinal = null;
+function calcular() {
+  if (!elegida) return;
+  const ini = parseProg($('#eje-ini').value) ?? 0;
+  ejeFinal = conProgresiva(elegida.puntos, ini, $('#eje-inv').checked);
+  const a = ejeFinal[0], b = ejeFinal[ejeFinal.length - 1];
+  $('#eje-res').innerHTML = `Capa <b>${elegida.capa}</b> · ${ejeFinal.length} puntos<br>
+    Inicio ${fmtProg(a[2], 2)} en E ${a[0].toFixed(1)}, N ${a[1].toFixed(1)}<br>
+    Final <b>${fmtProg(b[2], 2)}</b> en E ${b[0].toFixed(1)}, N ${b[1].toFixed(1)}<br>Longitud ${(b[2] - a[2]).toFixed(2)} m`;
+}
+$('#f-eje').onchange = async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  const txt = await f.text();
+  $('#eje-lista').innerHTML = ''; elegida = null; $('#eje-op').classList.add('oculto');
+  if (/\.dxf$/i.test(f.name)) {
+    polis = leerPolilineas(txt).filter((p) => p.largo > 50).slice(0, 25);
+    if (!polis.length) return res('#r-eje', 'No encontré polilíneas en el DXF. Une el eje en una sola polilínea (comando JUNTAR) y vuelve a guardarlo como DXF.');
+    $('#eje-lista').innerHTML = `<p class="ayuda" style="margin-top:10px">Elige la polilínea del eje (ordenadas de la más larga a la más corta):</p>
+      <table><tr><th></th><th>Capa</th><th>Longitud (m)</th><th>Vértices</th></tr>${polis.map((p, i) => `<tr data-i="${i}"><td><input type="radio" name="pl" value="${i}"></td><td>${p.capa}</td><td>${p.largo.toFixed(2)}</td><td>${p.v.length}</td></tr>`).join('')}</table>`;
+    $('#eje-lista').querySelectorAll('input[name=pl]').forEach((r) => r.onchange = () => {
+      elegida = polis[+r.value];
+      $('#eje-lista').querySelectorAll('tr').forEach((t) => t.classList.toggle('sel', t.dataset.i === r.value));
+      $('#eje-op').classList.remove('oculto'); calcular();
+    });
+    res('#r-eje', '', true);
+  } else {
+    const filas = leerCSV(txt);
+    if (!filas.length || !('E' in filas[0]) || !('N' in filas[0])) return res('#r-eje', 'El CSV debe tener columnas E y N.');
+    const n = (x) => +String(x).replace(',', '.');
+    const conProg = filas[0].PROG !== undefined && filas[0].PROG !== '';
+    // con columna PROG se respeta la progresiva del archivo (p.ej. la de Civil 3D)
+    const pts = filas.map((r) => conProg ? [n(r.E), n(r.N), n(r.PROG) - n(filas[0].PROG)] : [n(r.E), n(r.N)]);
+    elegida = { capa: f.name, puntos: pts };
+    $('#eje-op').classList.remove('oculto');
+    if (conProg) $('#eje-ini').value = fmtProg(n(filas[0].PROG), 3);
+    calcular();
+  }
+};
+$('#eje-ini').oninput = calcular;
+$('#eje-inv').onchange = calcular;
+$('#eje-subir').onclick = async () => {
+  if (!ejeFinal) return;
+  if (!confirm(`¿Reemplazar el eje del proyecto por este (${ejeFinal.length} puntos, final ${fmtProg(ejeFinal[ejeFinal.length - 1][2])})?\nLos elementos se ubicarán sobre el nuevo eje según su progresiva.`)) return;
+  res('#r-eje', 'Subiendo…', true);
+  try { const r = await post({ a: 'cargar_tabla', hoja: 'EJE', filas: ejeFinal }); res('#r-eje', `Listo: ${r.filas} puntos cargados. El equipo verá el nuevo eje al actualizar.`, true); }
+  catch (e) { res('#r-eje', 'Error: ' + e.message); }
+};
+
+const subirCSV = (hoja) => async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  const filas = leerCSV(await f.text());
+  if (!filas.length) return res('#r-tab', 'El archivo está vacío');
+  if (!confirm(`¿Reemplazar la hoja ${hoja} completa por ${filas.length} filas de «${f.name}»?`)) return;
+  res('#r-tab', 'Subiendo…', true);
+  try { const r = await post({ a: 'cargar_tabla', hoja, filas }); res('#r-tab', `${hoja}: ${r.filas} filas cargadas.`, true); }
+  catch (er) { res('#r-tab', 'Error: ' + er.message); }
+  e.target.value = '';
+};
+$('#f-elem').onchange = subirCSV('ELEMENTOS');
+$('#f-bm').onchange = subirCSV('BM');
+
+$('#respaldo').onclick = async () => {
+  try {
+    const p = await get('proyecto');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(p)], { type: 'application/json' }));
+    a.download = `proyecto_${p.config.NOMBRE.replace(/\W+/g, '_')}.json`; a.click();
+    res('#r-resp', 'Descargado.', true);
+  } catch (e) { res('#r-resp', 'Error: ' + e.message); }
+};
+</script>
+</body>
+</html>
