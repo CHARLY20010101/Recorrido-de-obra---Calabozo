@@ -1,8 +1,9 @@
 // Guarda la app y los mapas vistos para que funcione sin señal.
-const VERSION = 'recorrido-v1.0.0';
+// Al publicar cambios en la app hay que subir VERSION: así los celulares descargan la nueva.
+const VERSION = 'recorrido-v1.1.0';
 const APP = [
   './', 'index.html', 'admin.html', 'manifest.webmanifest', 'css/app.css',
-  'js/app.js', 'js/geo.js', 'js/store.js', 'js/api.js', 'js/fotos.js', 'js/dxf.js',
+  'js/app.js', 'js/geo.js', 'js/store.js', 'js/api.js', 'js/fotos.js', 'js/dxf.js', 'js/iconos.js', 'js/camara.js',
   'vendor/leaflet/leaflet.js', 'vendor/leaflet/leaflet.css',
   'vendor/leaflet/images/layers.png', 'vendor/leaflet/images/layers-2x.png',
   'icons/icono-192.png', 'icons/icono-512.png',
@@ -11,7 +12,9 @@ const TESELAS = 'teselas-v1';
 const MAX_TESELAS = 6000;
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(VERSION).then((c) => c.addAll(APP)).then(() => self.skipWaiting()));
+  // cache: 'reload' evita copiar archivos viejos de la caché HTTP del navegador
+  e.waitUntil(caches.open(VERSION).then((c) => c.addAll(APP.map((u) => new Request(u, { cache: 'reload' }))))
+    .then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (e) => {

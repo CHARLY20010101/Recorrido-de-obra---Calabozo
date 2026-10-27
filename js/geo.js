@@ -57,11 +57,20 @@ export function parseProg(txt) {
   return /^\d+(\.\d+)?$/.test(s) ? +s : null;
 }
 
+// Lado respecto de quien mira: "off" ya debe venir orientado al sentido de avance
 export function fmtLado(off) {
   if (off == null) return '';
   const d = Math.abs(off);
   if (d < 1) return 'Sobre el eje';
   return `${off < 0 ? 'Izq.' : 'Der.'} ${d < 10 ? d.toFixed(1) : Math.round(d)} m`;
+}
+
+// Lado según la convención de planos (sentido de la progresiva): LI / LD
+export function fmtLadoProg(off) {
+  if (off == null) return '';
+  const d = Math.abs(off);
+  if (d < 1) return 'Eje';
+  return `${off < 0 ? 'LI' : 'LD'} ${d < 10 ? d.toFixed(1) : Math.round(d)} m`;
 }
 
 // Eje como polilínea con progresiva acumulada en cada vértice.
@@ -113,6 +122,7 @@ export class Eje {
       prog: this.p[i] + t * (this.p[i + 1] - this.p[i]),
       off: (cruz > 0 ? -1 : 1) * r.d, // negativo = izquierda, positivo = derecha
       dist: r.d,
+      az: (Math.atan2(dx, dy) / RAD + 360) % 360, // rumbo del eje (progresiva creciente), grados desde el norte
     };
   }
 
