@@ -63,7 +63,20 @@
   </div>
 
   <div class="tarjeta">
-    <h2>4. Respaldo</h2>
+    <h2>4. Logo para las fotos</h2>
+    <p class="ayuda">Se imprime arriba a la izquierda en las fotos de todo el equipo. Es propio de este proyecto: en otra obra o empresa se carga otro. Mejor en <b>PNG con fondo transparente</b>.</p>
+    <div class="fila" style="align-items:flex-start">
+      <div id="logo-actual" class="caja" style="min-width:140px;min-height:90px;display:flex;align-items:center;justify-content:center"><span class="ayuda">Sin logo</span></div>
+      <div class="crece">
+        <label class="btn" style="display:flex;align-items:center;justify-content:center">Elegir imagen del logo<input id="f-logo" type="file" accept="image/png,image/jpeg,image/webp" hidden></label>
+        <button class="btn peligro" id="logo-quitar" style="width:100%;margin-top:8px">Quitar logo</button>
+      </div>
+    </div>
+    <div id="r-logo" class="res"></div>
+  </div>
+
+  <div class="tarjeta">
+    <h2>5. Respaldo</h2>
     <p class="ayuda">Descarga el proyecto como archivo .json. La app puede abrirlo sin conexión a la hoja (por ejemplo, para otra persona o como respaldo).</p>
     <button class="btn" id="respaldo">Descargar archivo del proyecto</button>
     <div id="r-resp" class="res"></div>
@@ -95,6 +108,7 @@ $('#conectar').onclick = async () => {
     await get('enlace'); // solo responde con la clave de administración
     const p = await get('proyecto');
     res('#r-con', `Conectado a «${p.config.NOMBRE}»: eje de ${p.eje.length} vértices, ${p.elementos.length} elementos, ${p.bm.length} BM.`, true);
+    verLogo(p.logo);
   } catch (e) { res('#r-con', 'No se pudo conectar: ' + e.message); }
 };
 if (inv) $('#conectar').click();
@@ -159,6 +173,33 @@ const subirCSV = (hoja) => async (e) => {
 };
 $('#f-elem').onchange = subirCSV('ELEMENTOS');
 $('#f-bm').onchange = subirCSV('BM');
+
+// ---- logo: se reduce a 600 px como máximo (PNG conserva la transparencia) ----
+function verLogo(src) {
+  $('#logo-actual').innerHTML = src ? `<img src="${src}" alt="Logo actual" style="max-width:220px;max-height:120px">` : '<span class="ayuda">Sin logo</span>';
+}
+$('#f-logo').onchange = async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  try {
+    const img = await new Promise((ok, mal) => { const i = new Image(); i.onload = () => ok(i); i.onerror = mal; i.src = URL.createObjectURL(f); });
+    const k = Math.min(1, 600 / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = document.createElement('canvas');
+    c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    const url = c.toDataURL('image/png');
+    verLogo(url);
+    if (!confirm('¿Usar esta imagen como logo de las fotos del proyecto?')) return;
+    res('#r-logo', 'Subiendo…', true);
+    await post({ a: 'logo_subir', datos: url.split(',')[1], tipo: 'image/png' });
+    res('#r-logo', 'Logo cargado. El equipo lo verá en sus fotos al actualizar la app (en unos minutos).', true);
+  } catch (er) { res('#r-logo', 'Error: ' + er.message); }
+  e.target.value = '';
+};
+$('#logo-quitar').onclick = async () => {
+  if (!confirm('¿Quitar el logo de las fotos del proyecto? (la imagen se conserva en Drive)')) return;
+  try { await post({ a: 'logo_quitar' }); verLogo(''); res('#r-logo', 'Logo quitado.', true); }
+  catch (er) { res('#r-logo', 'Error: ' + er.message); }
+};
 
 $('#respaldo').onclick = async () => {
   try {

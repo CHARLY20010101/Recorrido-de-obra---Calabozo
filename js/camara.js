@@ -1,7 +1,11 @@
-// Cámara de obra: vista en vivo y foto con un sello impreso en la imagen (progresiva,
-// coordenadas, fecha, usuario y obra), al estilo de las apps de cámara GPS pero con la
-// progresiva del proyecto. Si el teléfono no deja abrir la cámara dentro de la app, la
-// "Cámara del teléfono" también sirve: a esa foto se le imprime el mismo sello.
+// Cámara de obra: vista en vivo y foto con un sello impreso en la imagen, al estilo de las
+// apps de cámara GPS pero con la progresiva del proyecto:
+//   arriba a la izquierda   logo del supervisor (se configura por proyecto)
+//   arriba a la derecha     brújula con la aguja hacia donde apunta la cámara
+//   abajo a la izquierda    minimapa satelital con el eje y tu posición
+//   abajo a la derecha      progresiva, coordenadas, fecha, usuario y obra
+// Si el teléfono no deja abrir la cámara dentro de la app, la "Cámara del teléfono" también
+// sirve: a esa foto se le imprime el mismo sello.
 //
 // La app está fijada en vertical, así que la cámara entrega siempre un cuadro vertical.
 // Con el sensor de orientación se sabe si el teléfono está en horizontal y la foto se gira
@@ -9,29 +13,200 @@
 
 const LADO_MAX = 2048;
 const RAD = Math.PI / 180;
+
+// Opacidad de cada elemento del sello (0 a 1). El usuario la ajusta en "Sello de las fotos".
+export const ESTILO_BASE = { logo: 1, logoFondo: .82, brujula: 1, brujulaFondo: .5, mapa: 1, texto: .58 };
+
+// Dibuja un elemento en un lienzo aparte y lo pega con la opacidad pedida,
+// para que todo el elemento (no cada trazo por separado) quede translúcido
+async function capa(ctx, x, y, w, h, op, dibujar) {
+  if (op <= 0) return;
+  const c = document.createElement('canvas');
+  c.width = Math.ceil(w); c.height = Math.ceil(h);
+  await dibujar(c.getContext('2d'));
+  ctx.save(); ctx.globalAlpha = Math.min(1, op);
+  ctx.drawImage(c, x, y);
+  ctx.restore();
+}
+const FUENTE = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-// Sello en la esquina inferior izquierda; la primera línea (progresiva) va resaltada
-export function dibujarSello(ctx, w, h, lineas) {
-  const fs = Math.max(14, Math.round(Math.min(w, h) / 30));
-  const fsT = Math.round(fs * 1.3), pad = Math.round(fs * .7), lh = Math.round(fs * 1.35);
-  const fuente = (t) => `${t ? 800 : 600} ${t ? fsT : fs}px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`;
-  let ancho = 0;
-  lineas.forEach((l, i) => { ctx.font = fuente(i === 0); ancho = Math.max(ancho, ctx.measureText(l).width); });
+// ================= composición de la foto =================
+
+// Texto abajo a la derecha; la primera línea (progresiva) va resaltada.
+// "reserva" es el ancho ocupado a la izquierda por el minimapa.
+function dibujarTexto(ctx, w, h, lineas, margen, reserva, fondo = ESTILO_BASE.texto) {
+  const m = Math.min(w, h);
+  let fs = Math.max(14, Math.round(m / 30));
+  const medir = () => {
+    const fsT = Math.round(fs * 1.3), pad = Math.round(fs * .7);
+    let ancho = 0;
+    lineas.forEach((l, i) => { ctx.font = `${i ? 600 : 800} ${i ? fs : fsT}px ${FUENTE}`; ancho = Math.max(ancho, ctx.measureText(l).width); });
+    return { fsT, pad, ancho };
+  };
+  let d = medir();
+  const disponible = w - reserva - 2 * margen;
+  if (d.ancho + 2 * d.pad > disponible) { fs = Math.max(12, Math.floor(fs * disponible / (d.ancho + 2 * d.pad))); d = medir(); }
+  const { fsT, pad, ancho } = d, lh = Math.round(fs * 1.35);
   const alto = fsT * 1.35 + (lineas.length - 1) * lh + pad * 1.4;
-  const x = Math.round(pad * .6), y = Math.round(h - alto - pad * .6);
-  const bw = Math.min(w - 2 * x, ancho + 2 * pad);
-  ctx.fillStyle = 'rgba(0,0,0,.58)';
-  ctx.fillRect(x, y, bw, alto);
-  ctx.textBaseline = 'top';
+  const bw = Math.min(disponible, ancho + 2 * pad);
+  const x = w - margen - bw, y = h - margen - alto;
+  if (fondo > 0) { ctx.fillStyle = `rgba(0,0,0,${fondo})`; ctx.fillRect(x, y, bw, alto); }
+  ctx.textBaseline = 'top'; ctx.textAlign = 'right';
   let yy = y + pad * .7;
   lineas.forEach((l, i) => {
-    ctx.font = fuente(i === 0);
-    ctx.fillStyle = i === 0 ? '#ffb300' : '#ffffff';
-    ctx.fillText(l, x + pad, yy, bw - 2 * pad);
-    yy += i === 0 ? fsT * 1.35 : lh;
+    ctx.font = `${i ? 600 : 800} ${i ? fs : fsT}px ${FUENTE}`;
+    ctx.fillStyle = i ? '#ffffff' : '#ffb300';
+    ctx.fillText(l, x + bw - pad, yy, bw - 2 * pad);
+    yy += i ? lh : fsT * 1.35;
+  });
+  ctx.textAlign = 'left';
+}
+
+function rectRedondo(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+
+// Logo arriba a la izquierda, sobre un recuadro blanco (fondo 0 = sin recuadro)
+async function dibujarLogo(ctx, logo, margen, m, op, fondo) {
+  const alto = m * .17, pad = alto * .1;
+  const lw = logo.naturalWidth || logo.width, lh = logo.naturalHeight || logo.height;
+  if (!lw || !lh) return;
+  let dh = alto, dw = lw / lh * dh;
+  if (dw > m * .45) { dw = m * .45; dh = lh / lw * dw; }
+  await capa(ctx, margen, margen, dw + 2 * pad, dh + 2 * pad, op, (c) => {
+    if (fondo > 0) {
+      c.fillStyle = `rgba(255,255,255,${fondo})`;
+      rectRedondo(c, 0, 0, dw + 2 * pad, dh + 2 * pad, pad);
+      c.fill();
+    }
+    c.drawImage(logo, pad, pad, dw, dh);
   });
 }
+
+// Brújula: dial con N (rojo), E, S, O y una aguja que apunta hacia donde mira la cámara
+export function dibujarBrujula(ctx, cx, cy, r, rumbo, fondo = ESTILO_BASE.brujulaFondo) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, 2 * Math.PI);
+  if (fondo > 0) { ctx.fillStyle = `rgba(0,0,0,${fondo})`; ctx.fill(); }
+  ctx.lineWidth = r * .07; ctx.strokeStyle = '#fff'; ctx.stroke();
+  ctx.lineCap = 'round';
+  for (let i = 0; i < 16; i++) {
+    const a = i * 22.5 * RAD, largo = i % 4 === 0 ? .2 : i % 2 === 0 ? .13 : .07;
+    ctx.beginPath();
+    ctx.moveTo(Math.sin(a) * r * .88, -Math.cos(a) * r * .88);
+    ctx.lineTo(Math.sin(a) * r * (.88 - largo), -Math.cos(a) * r * (.88 - largo));
+    ctx.lineWidth = r * (i % 4 === 0 ? .05 : .03); ctx.strokeStyle = 'rgba(255,255,255,.85)'; ctx.stroke();
+  }
+  ctx.font = `800 ${Math.round(r * .3)}px ${FUENTE}`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  [['N', 0, '#ff5252'], ['E', 90, '#fff'], ['S', 180, '#fff'], ['O', 270, '#fff']].forEach(([t, a, c]) => {
+    ctx.fillStyle = c; ctx.fillText(t, Math.sin(a * RAD) * r * .56, -Math.cos(a * RAD) * r * .56);
+  });
+  // aguja
+  ctx.rotate(rumbo * RAD);
+  ctx.beginPath(); ctx.moveTo(0, -r * .8); ctx.lineTo(r * .14, 0); ctx.lineTo(-r * .14, 0); ctx.closePath();
+  ctx.fillStyle = '#ffb300'; ctx.fill();
+  ctx.lineWidth = r * .025; ctx.strokeStyle = '#000'; ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0, r * .45); ctx.lineTo(r * .11, 0); ctx.lineTo(-r * .11, 0); ctx.closePath();
+  ctx.fillStyle = '#fff'; ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.arc(0, 0, r * .08, 0, 2 * Math.PI); ctx.fillStyle = '#000'; ctx.fill();
+  ctx.restore();
+  ctx.textAlign = 'left';
+}
+
+// ---- minimapa satelital (teselas de Esri a zoom 15, unos 2 km de ancho) ----
+const ZOOM = 15, VISTA = 460; // px del mundo a ese zoom que muestra el minimapa
+const teselas = new Map();
+function tesela(z, x, y) {
+  const k = `${z}/${x}/${y}`;
+  if (!teselas.has(k)) {
+    teselas.set(k, fetch(`https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`, { mode: 'cors' })
+      .then((r) => (r.ok ? r.blob() : null)).then((b) => (b ? createImageBitmap(b) : null)).catch(() => null));
+  }
+  return teselas.get(k);
+}
+const aMundo = (lat, lon) => {
+  const n = 256 * 2 ** ZOOM, s = Math.sin(lat * RAD);
+  return [(lon + 180) / 360 * n, (.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * n];
+};
+function teselasDe(lat, lon) {
+  const [cx, cy] = aMundo(lat, lon), izq = cx - VISTA / 2, arr = cy - VISTA / 2, lista = [];
+  for (let tx = Math.floor(izq / 256); tx <= Math.floor((izq + VISTA) / 256); tx++)
+    for (let ty = Math.floor(arr / 256); ty <= Math.floor((arr + VISTA) / 256); ty++) lista.push([tx, ty]);
+  return { izq, arr, lista };
+}
+// descarga anticipada al abrir la cámara, para que la foto salga al instante
+export function precargarMinimapa(lat, lon) { teselasDe(lat, lon).lista.forEach(([x, y]) => tesela(ZOOM, x, y)); }
+
+async function dibujarMinimapa(ctx, x0, y0, tam, { lat, lon, eje, rumbo }) {
+  const { izq, arr, lista } = teselasDe(lat, lon), s = tam / VISTA;
+  const espera = new Promise((r) => setTimeout(() => r(null), 2500));
+  const imgs = await Promise.all(lista.map(([x, y]) => Promise.race([tesela(ZOOM, x, y), espera])));
+  ctx.save();
+  rectRedondo(ctx, x0, y0, tam, tam, tam * .05);
+  ctx.clip();
+  ctx.fillStyle = '#5b6b5a'; ctx.fillRect(x0, y0, tam, tam); // sin señal: fondo liso, el eje se dibuja igual
+  lista.forEach(([tx, ty], i) => { if (imgs[i]) ctx.drawImage(imgs[i], x0 + (tx * 256 - izq) * s, y0 + (ty * 256 - arr) * s, 256 * s, 256 * s); });
+  // eje de la vía
+  if (eje?.length) {
+    ctx.beginPath();
+    let dentro = false;
+    for (const [la, lo] of eje) {
+      const [wx, wy] = aMundo(la, lo), px = x0 + (wx - izq) * s, py = y0 + (wy - arr) * s;
+      const cerca = px > x0 - tam && px < x0 + 2 * tam && py > y0 - tam && py < y0 + 2 * tam;
+      if (cerca && dentro) ctx.lineTo(px, py); else if (cerca) ctx.moveTo(px, py);
+      dentro = cerca;
+    }
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = 6 * s; ctx.strokeStyle = 'rgba(0,0,0,.6)'; ctx.stroke();
+    ctx.lineWidth = 3.5 * s; ctx.strokeStyle = '#ffd54f'; ctx.stroke();
+  }
+  // posición, con un cono hacia donde mira la cámara
+  const cx = x0 + tam / 2, cy = y0 + tam / 2;
+  if (rumbo != null) {
+    ctx.beginPath(); ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, 34 * s, (rumbo - 90 - 28) * RAD, (rumbo - 90 + 28) * RAD);
+    ctx.closePath(); ctx.fillStyle = 'rgba(66,165,245,.45)'; ctx.fill();
+  }
+  ctx.beginPath(); ctx.arc(cx, cy, 16 * s, 0, 2 * Math.PI); ctx.fillStyle = 'rgba(25,118,210,.25)'; ctx.fill();
+  ctx.beginPath(); ctx.arc(cx, cy, 8 * s, 0, 2 * Math.PI); ctx.fillStyle = '#1976d2'; ctx.fill();
+  ctx.lineWidth = 3 * s; ctx.strokeStyle = '#fff'; ctx.stroke();
+  // norte y atribución
+  ctx.font = `800 ${Math.round(18 * s)}px ${FUENTE}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.lineWidth = 4 * s; ctx.strokeStyle = 'rgba(0,0,0,.7)';
+  ctx.strokeText('N ▲', x0 + tam - 26 * s, y0 + 18 * s); ctx.fillStyle = '#fff'; ctx.fillText('N ▲', x0 + tam - 26 * s, y0 + 18 * s);
+  ctx.font = `600 ${Math.round(11 * s)}px ${FUENTE}`; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+  ctx.fillStyle = 'rgba(255,255,255,.8)'; ctx.fillText('© Esri', x0 + 6 * s, y0 + tam - 4 * s);
+  ctx.restore();
+  ctx.lineWidth = Math.max(2, 3 * s); ctx.strokeStyle = '#fff';
+  rectRedondo(ctx, x0, y0, tam, tam, tam * .05); ctx.stroke();
+}
+
+// Imprime sobre la foto ya girada: logo, brújula, minimapa y texto, cada uno con su opacidad
+export async function componer(c, { lineas, logo = null, mapa = null, rumbo = null, estilo = null }) {
+  const e = { ...ESTILO_BASE, ...estilo };
+  const ctx = c.getContext('2d'), w = c.width, h = c.height, m = Math.min(w, h);
+  const margen = Math.round(m * .025);
+  if (logo) await dibujarLogo(ctx, logo, margen, m, e.logo, e.logoFondo);
+  if (rumbo != null) {
+    const r = m * .085, lado = Math.ceil(2 * r + 4);
+    await capa(ctx, w - margen - lado, margen, lado, lado, e.brujula, (b) => dibujarBrujula(b, lado / 2, lado / 2, r, rumbo, e.brujulaFondo));
+  }
+  let reserva = 0;
+  if (mapa) {
+    const tam = Math.round(m * .3);
+    await capa(ctx, margen, h - margen - tam, tam, tam, e.mapa, (b) => dibujarMinimapa(b, 0, 0, tam, { ...mapa, rumbo }));
+    reserva = tam + margen;
+  }
+  dibujarTexto(ctx, w, h, lineas, margen, reserva, e.texto);
+  return c;
+}
+
+// ================= captura y orientación =================
 
 function lienzo(w, h) {
   const k = Math.min(1, LADO_MAX / Math.max(w, h));
@@ -68,6 +243,18 @@ function giroFisico(beta, gamma) {
   return dif < 35 ? cerca : null; // zona intermedia: no cambia (evita saltos)
 }
 
+// Rumbo (grados desde el norte, horario) hacia donde apunta la cámara trasera.
+// alpha absoluto: 0 = la parte de arriba del teléfono, acostado, apunta al norte.
+export function rumboCamara(alpha, beta, gamma) {
+  const a = alpha * RAD, b = beta * RAD, g = gamma * RAD;
+  let e = -Math.cos(a) * Math.sin(g) - Math.sin(a) * Math.sin(b) * Math.cos(g);
+  let n = -Math.sin(a) * Math.sin(g) + Math.cos(a) * Math.sin(b) * Math.cos(g);
+  if (Math.hypot(e, n) < 0.3) { // cámara hacia el suelo o el cielo: manda la parte de arriba del teléfono
+    e = -Math.sin(a) * Math.cos(b); n = Math.cos(a) * Math.cos(b);
+  }
+  return (Math.atan2(e, n) / RAD + 360) % 360;
+}
+
 // Giro de la interfaz (si el sistema rotó la pantalla, la cámara ya entrega el cuadro girado)
 function giroPantalla() {
   const a = screen.orientation?.angle ?? window.orientation ?? 0;
@@ -83,29 +270,32 @@ function salida(canvas) {
 }
 
 // Foto tomada con la cámara del sistema: se reduce y se le imprime el sello
-export async function sellarArchivo(file, lineas) {
+export async function sellarArchivo(file, sello) {
   const img = await new Promise((res, rej) => {
     const i = new Image();
     i.onload = () => res(i); i.onerror = rej;
     i.src = URL.createObjectURL(file);
   });
   const c = lienzo(img.naturalWidth, img.naturalHeight);
-  const ctx = c.getContext('2d');
-  ctx.drawImage(img, 0, 0, c.width, c.height);
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
   URL.revokeObjectURL(img.src);
-  dibujarSello(ctx, c.width, c.height, lineas);
+  await componer(c, sello);
   return salida(c);
 }
 
-// Pantalla de cámara. lineas(): texto del sello en ese momento; alFoto({datos, mini}) por cada foto.
-export function abrirCamara({ lineas, alFoto, alCerrar }) {
-  // iPhone pide permiso para el sensor de orientación; debe pedirse dentro del toque que abre la cámara
+// ================= pantalla de cámara =================
+// lineas(): texto del sello en ese momento; contexto(): {lat, lon, eje} o null si no hay GPS;
+// opciones: {logo, mapa, brujula}; alFoto({datos, mini, rumbo}) por cada foto.
+export function abrirCamara({ lineas, contexto, opciones = {}, alFoto, alCerrar }) {
+  // iPhone pide permiso para el sensor de orientación y la brújula; debe pedirse dentro del
+  // toque que abre la cámara
   try { window.DeviceOrientationEvent?.requestPermission?.().catch(() => {}); } catch { /* sin sensor */ }
   const cont = document.createElement('div');
   cont.id = 'camara';
   cont.innerHTML = `
     <video playsinline muted autoplay></video>
     <div class="cam-cont"></div>
+    <canvas class="cam-brujula oculto" width="120" height="120"></canvas>
     <button class="cam-orient"></button>
     <div class="cam-msg oculto"></div>
     <div class="cam-sello"></div>
@@ -117,9 +307,9 @@ export function abrirCamara({ lineas, alFoto, alCerrar }) {
     </div>`;
   document.body.appendChild(cont);
   const video = cont.querySelector('video'), disparo = cont.querySelector('.cam-disparo');
-  let stream = null, n = 0;
+  let stream = null, n = 0, pendientes = 0;
 
-  // orientación: automática por sensor, o fijada a mano con el botón
+  // ---- orientación: automática por sensor, o fijada a mano con el botón ----
   let fisico = 0, modo = 'auto';
   const giro = () => {
     const p = modo === 'v' ? 0 : modo === 'h' ? 90 : fisico;
@@ -137,43 +327,91 @@ export function abrirCamara({ lineas, alFoto, alCerrar }) {
     const g = giroFisico(e.beta, e.gamma);
     if (g != null && g !== fisico) { fisico = g; pintarOrient(); }
   };
-  window.addEventListener('deviceorientation', alOrientar);
   cont.querySelector('.cam-orient').onclick = () => {
     modo = { auto: 'h', h: 'v', v: 'auto' }[modo];
     pintarOrient();
   };
   pintarOrient();
 
+  // ---- brújula: Android da el ángulo absoluto en "deviceorientationabsolute";
+  // iPhone da webkitCompassHeading. Se suaviza promediando el vector. ----
+  let bx = 0, by = 0, rumbo = null;
+  const alBrujula = (e) => {
+    let a = null;
+    if (e.webkitCompassHeading != null && !isNaN(e.webkitCompassHeading)) a = 360 - e.webkitCompassHeading;
+    else if (e.absolute && e.alpha != null) a = e.alpha;
+    if (a == null || e.beta == null || e.gamma == null) return;
+    const r = rumboCamara(a, e.beta, e.gamma) * RAD;
+    bx = bx * .8 + Math.sin(r) * .2; by = by * .8 + Math.cos(r) * .2;
+    rumbo = (Math.atan2(bx, by) / RAD + 360) % 360;
+  };
+  const alSensor = (e) => { alOrientar(e); alBrujula(e); };
+  window.addEventListener('deviceorientation', alSensor);
+  window.addEventListener('deviceorientationabsolute', alBrujula);
+  const rumboFoto = () => (opciones.brujula === false ? null : rumbo);
+
+  // ---- vista previa: texto del sello y brújula ----
   const pintarSello = () => {
     cont.querySelector('.cam-sello').innerHTML = lineas().map((l, i) => `<div${i ? '' : ' class="t"'}>${esc(l)}</div>`).join('');
   };
+  const lienzoB = cont.querySelector('.cam-brujula');
+  const pintarBrujula = () => {
+    const r = rumboFoto();
+    lienzoB.classList.toggle('oculto', r == null);
+    if (r == null) return;
+    const ctx = lienzoB.getContext('2d'), est = { ...ESTILO_BASE, ...opciones.estilo };
+    ctx.clearRect(0, 0, 120, 120);
+    ctx.globalAlpha = est.brujula;
+    dibujarBrujula(ctx, 60, 60, 56, r, est.brujulaFondo);
+    ctx.globalAlpha = 1;
+  };
   pintarSello();
+  const ctx0 = contexto();
+  if (ctx0 && opciones.mapa !== false) precargarMinimapa(ctx0.lat, ctx0.lon);
   const timer = setInterval(pintarSello, 1000);
-  const contar = () => { cont.querySelector('.cam-cont').textContent = n ? `${n} foto${n > 1 ? 's' : ''} agregada${n > 1 ? 's' : ''}` : ''; };
+  const timerB = setInterval(pintarBrujula, 200);
+  const contar = () => {
+    cont.querySelector('.cam-cont').textContent = pendientes ? 'Guardando foto…' : n ? `${n} foto${n > 1 ? 's' : ''} agregada${n > 1 ? 's' : ''}` : '';
+  };
+  const datosSello = () => {
+    const c = contexto();
+    return { lineas: lineas(), logo: opciones.logo || null, mapa: opciones.mapa === false ? null : c, rumbo: rumboFoto(), estilo: opciones.estilo };
+  };
   const cerrar = () => {
-    clearInterval(timer);
-    window.removeEventListener('deviceorientation', alOrientar);
+    clearInterval(timer); clearInterval(timerB);
+    window.removeEventListener('deviceorientation', alSensor);
+    window.removeEventListener('deviceorientationabsolute', alBrujula);
     stream?.getTracks().forEach((t) => t.stop());
     cont.remove();
     alCerrar?.();
   };
-  cont.querySelector('.cam-listo').onclick = cerrar;
+  // "Listo" espera a que terminen las fotos que se están componiendo
+  cont.querySelector('.cam-listo').onclick = async () => {
+    while (pendientes) await new Promise((r) => setTimeout(r, 100));
+    cerrar();
+  };
 
-  disparo.onclick = () => {
+  disparo.onclick = async () => {
     if (!video.videoWidth) return;
     const flash = cont.querySelector('.cam-flash');
     flash.classList.add('on'); setTimeout(() => flash.classList.remove('on'), 60);
     navigator.vibrate?.(40);
-    const c = capturar(video, video.videoWidth, video.videoHeight, giro());
-    dibujarSello(c.getContext('2d'), c.width, c.height, lineas());
-    alFoto(salida(c));
-    n++; contar();
+    // el cuadro y los datos se toman en el instante del disparo; el minimapa se compone después
+    const c = capturar(video, video.videoWidth, video.videoHeight, giro()), sello = datosSello();
+    pendientes++; contar();
+    try {
+      await componer(c, sello);
+      alFoto({ ...salida(c), rumbo: sello.rumbo });
+      n++;
+    } finally { pendientes--; contar(); }
   };
 
   cont.querySelector('.cam-sistema input').onchange = async (e) => {
-    for (const f of e.target.files) { alFoto(await sellarArchivo(f, lineas())); n++; }
-    e.target.value = '';
-    contar();
+    const sello = datosSello();
+    pendientes++; contar();
+    try {
+      for (const f of e.target.files) { alFoto({ ...(await sellarArchivo(f, sello)), rumbo: sello.rumbo }); n++; }
+    } finally { pendientes--; e.target.value = ''; contar(); }
   };
 
   (async () => {

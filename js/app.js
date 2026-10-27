@@ -4,9 +4,9 @@ import { kv, obsDB, uid } from './store.js';
 import { api, leerEnlace } from './api.js';
 import { leerExif, reducir } from './fotos.js';
 import { iconoElemento, iconoBM, iconoUsuario, miniTipo } from './iconos.js';
-import { abrirCamara } from './camara.js';
+import { abrirCamara, componer, ESTILO_BASE } from './camara.js';
 
-const VERSION_APP = '1.1.1';
+const VERSION_APP = '1.2.0';
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const RAD = Math.PI / 180;
@@ -15,6 +15,8 @@ const EN_VIA_M = 1000; // más lejos del eje que esto, la app pasa a modo consul
 const AJUSTES_BASE = {
   nombre: '', voz: true, vibrar: true, pantalla: true,
   cada: 100, distAviso: 50, fueraEje: 40, tipos: null, // null = todos
+  fotoLogo: true, fotoMapa: true, fotoBrujula: true, // qué se imprime en las fotos
+  estiloFoto: null, // opacidades del sello (null = ESTILO_BASE)
 };
 const CATEGORIAS = ['Calidad', 'Seguridad', 'Avance', 'Medio ambiente', 'Topografía', 'Otro'];
 const ESTADOS_OBS = ['ABIERTA', 'EN PROCESO', 'LEVANTADA', 'ANULADA'];
@@ -69,7 +71,7 @@ mapa.on('moveend', () => { if (!S.enVia) mostrarCentro(); });
 function dibujarProyecto() {
   Object.values(G).forEach((g) => g !== G.yo && g.clearLayers());
   if (!S.eje) return;
-  const ll = S.eje.latlngs();
+  const ll = S.ejeLL;
   L.polyline(ll, { color: '#000', weight: 7, opacity: .55, interactive: false }).addTo(G.eje);
   L.polyline(ll, { color: '#ffd54f', weight: 4, opacity: 1 }).addTo(G.eje)
     .on('click', (e) => { const u = ubicarLatLon(e.latlng.lat, e.latlng.lng); L.popup().setLatLng(e.latlng).setContent(`<h3>Km ${fmtProg(u.prog)}</h3>Eje de la vía`).openOn(mapa); });
@@ -422,6 +424,10 @@ function aplicarDatos(datos) {
   const c = datos.config || {};
   const zona = +c.ZONA_UTM || 17, sur = String(c.HEMISFERIO || 'S').toUpperCase().startsWith('S');
   S.eje = datos.eje?.length > 1 ? new Eje(datos.eje, zona, sur) : null;
+  S.ejeLL = S.eje ? S.eje.latlngs() : null;
+  // logo del supervisor para las fotos (se carga por proyecto desde la página de administración)
+  S.logo = null;
+  if (datos.logo) { S.logo = new Image(); S.logo.src = datos.logo; }
   S.tipos = {};
   for (const t of datos.tipos || []) S.tipos[t.TIPO] = [t.NOMBRE, t.COLOR || '#757575'];
   S.elementos = (datos.elementos || []).filter((e) => e.CODIGO && e.PROG_INI !== '' && e.PROG_INI != null).map((e) => ({
@@ -431,7 +437,7 @@ function aplicarDatos(datos) {
     estado: e.ESTADO, obs: e.OBS,
   })).sort((a, b) => a.ini - b.ini);
   dibujarProyecto();
-  if (S.eje && S.encuadrar && !S.enVia) mapa.fitBounds(L.latLngBounds(S.eje.latlngs()), { padding: [20, 20] });
+  if (S.eje && S.encuadrar && !S.enVia) mapa.fitBounds(L.latLngBounds(S.ejeLL), { padding: [20, 20] });
   S.encuadrar = false;
   mostrarCentro();
 }
@@ -528,13 +534,14 @@ function menu() {
     <button data-a="proyectos"><span class="ic">📁</span>Proyectos<span class="nota">${esc(proyActual()?.nombre || 'ninguno')}</span></button>
     <button data-a="actualizar"><span class="ic">🔄</span>Actualizar datos ahora</button>
     <button data-a="ajustes"><span class="ic">⚙️</span>Ajustes y avisos</button>
+    <button data-a="sello"><span class="ic">📷</span>Sello de las fotos</button>
     <button data-a="demo"><span class="ic">🚶</span>Modo demostración${S.sim ? '<span class="nota">en curso</span>' : ''}</button>
     <button data-a="ayuda"><span class="ic">❓</span>Cómo se usa</button>
   </div><p class="ayuda" style="text-align:center;margin-top:14px">Recorrido de Obra v${VERSION_APP}</p>`);
   c.querySelectorAll('button').forEach((b) => b.onclick = () => ({
     buscar: pantallaBuscar, elementos: pantallaElementos, obs: pantallaObs, proyectos: pantallaProyectos,
     gps: () => { cerrarHoja(); pausarGPS(!S.pausado); },
-    actualizar: () => { cerrarHoja(); actualizarDatos(true, true); }, ajustes: pantallaAjustes, demo: pantallaDemo, ayuda: pantallaAyuda,
+    actualizar: () => { cerrarHoja(); actualizarDatos(true, true); }, ajustes: pantallaAjustes, sello: pantallaSello, demo: pantallaDemo, ayuda: pantallaAyuda,
   })[b.dataset.a]());
 }
 
@@ -625,7 +632,7 @@ function lineasSello() {
   if (S.pos && Date.now() - S.pos.t < 20000 && S.u) {
     const [E, N] = latLonAUtm(S.pos.lat, S.pos.lon, S.eje.zona, S.eje.sur);
     lineas.push(S.u.dist <= EN_VIA_M ? `Km ${fmtProg(S.u.prog, 1)}` : `Fuera de la vía · ${(S.u.dist / 1000).toFixed(1)} km del eje`);
-    lineas.push(`${S.pos.lat.toFixed(6)}, ${S.pos.lon.toFixed(6)} · ±${Math.round(S.pos.prec)} m${S.pos.simulada ? ' (simulación)' : ''}`);
+    lineas.push(`${S.pos.lat.toFixed(6)}, ${S.pos.lon.toFixed(6)}${S.pos.simulada ? ' (simulación)' : ''}`);
     lineas.push(`E ${E.toFixed(1)}  N ${N.toFixed(1)}`);
   } else lineas.push('Sin señal GPS');
   lineas.push(`${new Date().toLocaleString('es-PE', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })} · ${S.ajustes.nombre}`);
@@ -735,6 +742,12 @@ async function abrirObs(id = null, pre = {}) {
 
   const camara = () => abrirCamara({
     lineas: lineasSello,
+    // posición y eje para el minimapa (sin GPS reciente no se dibuja)
+    contexto: () => (S.pos && Date.now() - S.pos.t < 20000 ? { lat: S.pos.lat, lon: S.pos.lon, eje: S.ejeLL } : null),
+    opciones: {
+      logo: S.ajustes.fotoLogo && S.logo?.complete && S.logo.naturalWidth ? S.logo : null,
+      mapa: S.ajustes.fotoMapa, brujula: S.ajustes.fotoBrujula, estilo: S.ajustes.estiloFoto,
+    },
     alFoto: (f) => {
       const gps = S.pos && S.u ? { lat: S.pos.lat, lon: S.pos.lon, prec: Math.round(S.pos.prec), prog: S.u.prog, off: S.u.off } : null;
       o.fotos.push({ id: uid(), nombre: `foto_${gps ? fmtProg(gps.prog).replace('+', '-') : 'sin-gps'}.jpg`, ...f, gps, sello: true });
@@ -861,7 +874,9 @@ function pantallaAjustes() {
     ${opc('a-fuera', [20, 40, 60, 100, 200], a.fueraEje, (v) => `${v} m`)}
     <label class="campo">Elementos que quiero que me avise</label>
     <div class="chips" id="a-tipos">${tipos.map((t) => `<label><input type="checkbox" value="${esc(t)}" ${!a.tipos || a.tipos.includes(t) ? 'checked' : ''}>${miniTipo(t, colorTipo(t), 22)}${esc(nombreTipo(t))}</label>`).join('')}</div>
+    <button class="btn" id="a-sello" style="width:100%;margin-top:16px">📷 Sello de las fotos (logo, brújula, minimapa, transparencia)</button>
     <div class="botones"><button class="btn" id="a-probar">🔊 Probar aviso</button><button class="btn primario" id="a-guardar">Guardar</button></div>`);
+  c.querySelector('#a-sello').onclick = pantallaSello;
   c.querySelector('#a-probar').onclick = () => { S.ajustes.voz = c.querySelector('#a-voz').checked; alerta('Prueba: en 50 m, alcantarilla', 'En 50 metros, alcantarilla T M C de 36 pulgadas'); };
   c.querySelector('#a-guardar').onclick = async () => {
     const marcados = [...c.querySelectorAll('#a-tipos input:checked')].map((x) => x.value);
@@ -875,6 +890,107 @@ function pantallaAjustes() {
     if (S.ajustes.pantalla) pedirPantalla(); else soltarPantalla();
     cerrarHoja(); mostrarAviso('Ajustes guardados', 'info'); pintarEstado();
   };
+}
+
+// ---- sello de las fotos: qué se imprime y con qué transparencia, con vista previa en vivo ----
+function escenaPrueba(ctx, w, h) {
+  let g = ctx.createLinearGradient(0, 0, 0, h * .55);
+  g.addColorStop(0, '#8fb9e0'); g.addColorStop(1, '#e9eef2');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = '#6f8a6a';
+  ctx.beginPath(); ctx.moveTo(0, h * .5);
+  for (let x = 0; x <= w; x += w / 8) ctx.lineTo(x, h * (.36 + .1 * Math.sin(x / w * 7)));
+  ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.fill();
+  g = ctx.createLinearGradient(0, h * .5, 0, h);
+  g.addColorStop(0, '#4f7a3a'); g.addColorStop(1, '#2f4f22');
+  ctx.fillStyle = g; ctx.fillRect(0, h * .52, w, h);
+  ctx.fillStyle = '#8d8578';
+  ctx.beginPath(); ctx.moveTo(w * .46, h * .52); ctx.lineTo(w * .54, h * .52); ctx.lineTo(w * .95, h); ctx.lineTo(w * .2, h); ctx.fill();
+  for (let i = 0; i < 14; i++) {
+    ctx.fillStyle = i % 2 ? '#2e5a1f' : '#3d6e2a';
+    ctx.beginPath(); ctx.arc((i * 137) % w, h * (.5 + (i % 5) * .03), h * (.05 + (i % 3) * .02), 0, 2 * Math.PI); ctx.fill();
+  }
+}
+
+function logoEjemplo() {
+  const c = document.createElement('canvas'); c.width = 360; c.height = 160;
+  const x = c.getContext('2d');
+  x.fillStyle = '#0f2a3d'; x.beginPath(); x.roundRect?.(10, 10, 140, 140, 24); x.fill();
+  x.strokeStyle = '#ffb300'; x.lineWidth = 10; x.beginPath(); x.moveTo(40, 130); x.quadraticCurveTo(80, 40, 120, 30); x.stroke();
+  x.fillStyle = '#0f2a3d'; x.font = '800 44px system-ui, sans-serif'; x.fillText('TU LOGO', 165, 95);
+  return c;
+}
+
+function pantallaSello() {
+  const a = S.ajustes, est = { ...ESTILO_BASE, ...a.estiloFoto };
+  const on = { logo: a.fotoLogo, brujula: a.fotoBrujula, mapa: a.fotoMapa };
+  const barra = (k, t) => `<div class="desliz"><label for="r-${k}">${t}</label><b id="v-${k}">${Math.round(est[k] * 100)} %</b>
+    <input type="range" id="r-${k}" min="0" max="100" step="1" value="${Math.round(est[k] * 100)}"></div>`;
+  const grupo = (id, titulo, barras, nota = '') => `<div class="grupo-sello${on[id] ? '' : ' apagado'}" id="g-${id}">
+    <label class="campo"><input type="checkbox" id="t-${id}" ${on[id] ? 'checked' : ''}> ${titulo}</label>${nota}${barras}</div>`;
+  const c = hoja('Sello de las fotos', `
+    <div class="prev-sello"><canvas id="s-prev" width="720" height="540"></canvas></div>
+    <label class="btn" style="display:flex;align-items:center;justify-content:center;margin-top:8px">🖼 Ver sobre una foto mía<input id="s-foto" type="file" accept="image/*" hidden></label>
+    ${grupo('logo', 'Logo', barra('logo', 'Logo') + barra('logoFondo', 'Recuadro blanco'),
+      S.logo ? '' : '<p class="ayuda">Este proyecto aún no tiene logo; se muestra uno de ejemplo.</p>')}
+    ${grupo('brujula', 'Brújula', barra('brujula', 'Brújula') + barra('brujulaFondo', 'Fondo oscuro'))}
+    ${grupo('mapa', 'Minimapa', barra('mapa', 'Minimapa'))}
+    <div class="grupo-sello"><label class="campo">Texto</label>${barra('texto', 'Fondo oscuro')}</div>
+    <p class="ayuda">0 % = invisible · 100 % = sin transparencia. El ajuste se guarda en este celular.</p>
+    <div class="botones"><button class="btn" id="s-reset">Restablecer</button><button class="btn primario" id="s-guardar">Guardar</button></div>`);
+
+  const prev = c.querySelector('#s-prev'), claves = Object.keys(ESTILO_BASE);
+  const leer = () => Object.fromEntries(claves.map((k) => [k, +c.querySelector('#r-' + k).value / 100]));
+  const activo = (id) => c.querySelector('#t-' + id).checked;
+  const logo = S.logo?.complete && S.logo.naturalWidth ? S.logo : logoEjemplo();
+  let fondo = null, turno = 0;
+
+  const pintar = async () => {
+    const t = ++turno;
+    const cv = document.createElement('canvas'); cv.width = prev.width; cv.height = prev.height;
+    const ctx = cv.getContext('2d');
+    if (fondo) { // la foto elegida, recortada para llenar el cuadro
+      const k = Math.max(cv.width / fondo.naturalWidth, cv.height / fondo.naturalHeight);
+      ctx.drawImage(fondo, (cv.width - fondo.naturalWidth * k) / 2, (cv.height - fondo.naturalHeight * k) / 2, fondo.naturalWidth * k, fondo.naturalHeight * k);
+    } else escenaPrueba(ctx, cv.width, cv.height);
+    const gps = S.pos && Date.now() - S.pos.t < 20000;
+    // sin GPS: el punto del eje más cercano al centro del mapa, para que el minimapa muestre la vía
+    let centro = gps ? { lat: S.pos.lat, lng: S.pos.lon } : mapa.getCenter();
+    if (!gps && S.eje) { const [la, lo] = S.eje.puntoLatLon(ubicarLatLon(centro.lat, centro.lng).prog); centro = { lat: la, lng: lo }; }
+    const lineas = gps ? lineasSello() : ['Km 10+337.8', '-5.180723, -78.900982', 'E 732671.9  N 9426973.8',
+      `${new Date().toLocaleString('es-PE', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })} · ${S.ajustes.nombre || 'Usuario'}`,
+      proyActual()?.nombre || 'Obra'];
+    await componer(cv, {
+      lineas, logo: activo('logo') ? logo : null, rumbo: activo('brujula') ? 245 : null, estilo: leer(),
+      mapa: activo('mapa') && S.ejeLL ? { lat: centro.lat, lon: centro.lng, eje: S.ejeLL } : null,
+    });
+    if (t === turno) prev.getContext('2d').drawImage(cv, 0, 0);
+  };
+
+  claves.forEach((k) => c.querySelector('#r-' + k).addEventListener('input', (e) => {
+    c.querySelector('#v-' + k).textContent = `${e.target.value} %`;
+    pintar();
+  }));
+  ['logo', 'brujula', 'mapa'].forEach((id) => c.querySelector('#t-' + id).addEventListener('change', (e) => {
+    c.querySelector('#g-' + id).classList.toggle('apagado', !e.target.checked);
+    pintar();
+  }));
+  c.querySelector('#s-foto').onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    fondo = await new Promise((ok) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => ok(null); i.src = URL.createObjectURL(f); });
+    pintar();
+  };
+  c.querySelector('#s-reset').onclick = () => {
+    claves.forEach((k) => { c.querySelector('#r-' + k).value = Math.round(ESTILO_BASE[k] * 100); c.querySelector('#v-' + k).textContent = `${Math.round(ESTILO_BASE[k] * 100)} %`; });
+    ['logo', 'brujula', 'mapa'].forEach((id) => { c.querySelector('#t-' + id).checked = true; c.querySelector('#g-' + id).classList.remove('apagado'); });
+    pintar();
+  };
+  c.querySelector('#s-guardar').onclick = async () => {
+    Object.assign(S.ajustes, { estiloFoto: leer(), fotoLogo: activo('logo'), fotoBrujula: activo('brujula'), fotoMapa: activo('mapa') });
+    await kv.set('ajustes', S.ajustes);
+    cerrarHoja(); mostrarAviso('Sello de las fotos guardado', 'info');
+  };
+  pintar();
 }
 
 function pantallaNombre(luego) {
