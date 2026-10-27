@@ -6,7 +6,7 @@ import { leerExif, reducir } from './fotos.js';
 import { iconoElemento, iconoBM, iconoUsuario, miniTipo } from './iconos.js';
 import { abrirCamara } from './camara.js';
 
-const VERSION_APP = '1.1.0';
+const VERSION_APP = '1.1.1';
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const RAD = Math.PI / 180;
@@ -618,14 +618,15 @@ function exportarCSV() {
   a.click();
 }
 
-// Texto del sello de las fotos: progresiva, lado, coordenadas, fecha, usuario y obra
+// Texto del sello de las fotos: progresiva, coordenadas, fecha, usuario y obra
+// (el lado no va en la foto; queda registrado en la observación)
 function lineasSello() {
   const lineas = [];
   if (S.pos && Date.now() - S.pos.t < 20000 && S.u) {
     const [E, N] = latLonAUtm(S.pos.lat, S.pos.lon, S.eje.zona, S.eje.sur);
-    lineas.push(S.u.dist <= EN_VIA_M ? `Km ${fmtProg(S.u.prog, 1)} · ${fmtLadoProg(S.u.off)}` : `Fuera de la vía · ${(S.u.dist / 1000).toFixed(1)} km del eje`);
+    lineas.push(S.u.dist <= EN_VIA_M ? `Km ${fmtProg(S.u.prog, 1)}` : `Fuera de la vía · ${(S.u.dist / 1000).toFixed(1)} km del eje`);
     lineas.push(`${S.pos.lat.toFixed(6)}, ${S.pos.lon.toFixed(6)} · ±${Math.round(S.pos.prec)} m${S.pos.simulada ? ' (simulación)' : ''}`);
-    lineas.push(`E ${E.toFixed(1)}  N ${N.toFixed(1)} · UTM ${S.eje.zona}${S.eje.sur ? 'S' : 'N'} WGS84`);
+    lineas.push(`E ${E.toFixed(1)}  N ${N.toFixed(1)}`);
   } else lineas.push('Sin señal GPS');
   lineas.push(`${new Date().toLocaleString('es-PE', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })} · ${S.ajustes.nombre}`);
   if (proyActual()) lineas.push(proyActual().nombre);

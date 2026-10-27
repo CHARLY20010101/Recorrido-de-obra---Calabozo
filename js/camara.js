@@ -1,9 +1,14 @@
-// Cámara de obra: vista en vivo y foto con un sello impreso en la imagen (progresiva, lado,
+// Cámara de obra: vista en vivo y foto con un sello impreso en la imagen (progresiva,
 // coordenadas, fecha, usuario y obra), al estilo de las apps de cámara GPS pero con la
 // progresiva del proyecto. Si el teléfono no deja abrir la cámara dentro de la app, la
 // "Cámara del teléfono" también sirve: a esa foto se le imprime el mismo sello.
+//
+// La app está fijada en vertical, así que la cámara entrega siempre un cuadro vertical.
+// Con el sensor de orientación se sabe si el teléfono está en horizontal y la foto se gira
+// para que quede horizontal y con el sello derecho.
 
 const LADO_MAX = 2048;
+const RAD = Math.PI / 180;
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 // Sello en la esquina inferior izquierda; la primera línea (progresiva) va resaltada
@@ -35,6 +40,40 @@ function lienzo(w, h) {
   return c;
 }
 
+// Copia el cuadro girándolo r grados en sentido antihorario (0, 90, 180 o 270)
+export function capturar(fuente, w, h, r = 0) {
+  const girado = r === 90 || r === 270;
+  const c = lienzo(girado ? h : w, girado ? w : h);
+  const k = c.width / (girado ? h : w);
+  const ctx = c.getContext('2d');
+  ctx.save();
+  if (r === 90) { ctx.translate(0, c.height); ctx.rotate(-Math.PI / 2); }
+  else if (r === 270) { ctx.translate(c.width, 0); ctx.rotate(Math.PI / 2); }
+  else if (r === 180) { ctx.translate(c.width, c.height); ctx.rotate(Math.PI); }
+  ctx.drawImage(fuente, 0, 0, w * k, h * k);
+  ctx.restore();
+  return c;
+}
+
+// Giro físico del teléfono (grados antihorarios: 0 vertical, 90 con la parte de arriba hacia
+// la izquierda, 270 hacia la derecha, 180 de cabeza) a partir de beta/gamma del sensor.
+// Devuelve null si el teléfono está casi plano (apuntando al suelo): se conserva el último giro.
+function giroFisico(beta, gamma) {
+  const b = beta * RAD, g = gamma * RAD;
+  const ux = -Math.cos(b) * Math.sin(g), uy = Math.sin(b); // dirección "arriba" en la pantalla
+  if (Math.hypot(ux, uy) < 0.45) return null;
+  const ang = (Math.atan2(ux, uy) / RAD + 360) % 360;
+  const cerca = (Math.round(ang / 90) * 90) % 360;
+  const dif = Math.min(Math.abs(ang - cerca), 360 - Math.abs(ang - cerca));
+  return dif < 35 ? cerca : null; // zona intermedia: no cambia (evita saltos)
+}
+
+// Giro de la interfaz (si el sistema rotó la pantalla, la cámara ya entrega el cuadro girado)
+function giroPantalla() {
+  const a = screen.orientation?.angle ?? window.orientation ?? 0;
+  return ((a % 360) + 360) % 360;
+}
+
 function salida(canvas) {
   const k = 320 / Math.max(canvas.width, canvas.height);
   const m = document.createElement('canvas');
@@ -60,11 +99,14 @@ export async function sellarArchivo(file, lineas) {
 
 // Pantalla de cámara. lineas(): texto del sello en ese momento; alFoto({datos, mini}) por cada foto.
 export function abrirCamara({ lineas, alFoto, alCerrar }) {
+  // iPhone pide permiso para el sensor de orientación; debe pedirse dentro del toque que abre la cámara
+  try { window.DeviceOrientationEvent?.requestPermission?.().catch(() => {}); } catch { /* sin sensor */ }
   const cont = document.createElement('div');
   cont.id = 'camara';
   cont.innerHTML = `
     <video playsinline muted autoplay></video>
     <div class="cam-cont"></div>
+    <button class="cam-orient"></button>
     <div class="cam-msg oculto"></div>
     <div class="cam-sello"></div>
     <div class="cam-flash"></div>
@@ -77,6 +119,31 @@ export function abrirCamara({ lineas, alFoto, alCerrar }) {
   const video = cont.querySelector('video'), disparo = cont.querySelector('.cam-disparo');
   let stream = null, n = 0;
 
+  // orientación: automática por sensor, o fijada a mano con el botón
+  let fisico = 0, modo = 'auto';
+  const giro = () => {
+    const p = modo === 'v' ? 0 : modo === 'h' ? 90 : fisico;
+    return (p - giroPantalla() + 360) % 360;
+  };
+  const pintarOrient = () => {
+    const r = giro(), horizontal = r === 90 || r === 270;
+    cont.classList.remove('rot-90', 'rot-180', 'rot-270');
+    if (r) cont.classList.add('rot-' + r);
+    cont.querySelector('.cam-orient').textContent =
+      `${modo === 'auto' ? 'Auto' : 'Fijo'} · ${horizontal ? '▭ Horizontal' : '▯ Vertical'}`;
+  };
+  const alOrientar = (e) => {
+    if (e.beta == null || e.gamma == null) return;
+    const g = giroFisico(e.beta, e.gamma);
+    if (g != null && g !== fisico) { fisico = g; pintarOrient(); }
+  };
+  window.addEventListener('deviceorientation', alOrientar);
+  cont.querySelector('.cam-orient').onclick = () => {
+    modo = { auto: 'h', h: 'v', v: 'auto' }[modo];
+    pintarOrient();
+  };
+  pintarOrient();
+
   const pintarSello = () => {
     cont.querySelector('.cam-sello').innerHTML = lineas().map((l, i) => `<div${i ? '' : ' class="t"'}>${esc(l)}</div>`).join('');
   };
@@ -85,6 +152,7 @@ export function abrirCamara({ lineas, alFoto, alCerrar }) {
   const contar = () => { cont.querySelector('.cam-cont').textContent = n ? `${n} foto${n > 1 ? 's' : ''} agregada${n > 1 ? 's' : ''}` : ''; };
   const cerrar = () => {
     clearInterval(timer);
+    window.removeEventListener('deviceorientation', alOrientar);
     stream?.getTracks().forEach((t) => t.stop());
     cont.remove();
     alCerrar?.();
@@ -96,9 +164,8 @@ export function abrirCamara({ lineas, alFoto, alCerrar }) {
     const flash = cont.querySelector('.cam-flash');
     flash.classList.add('on'); setTimeout(() => flash.classList.remove('on'), 60);
     navigator.vibrate?.(40);
-    const c = lienzo(video.videoWidth, video.videoHeight), ctx = c.getContext('2d');
-    ctx.drawImage(video, 0, 0, c.width, c.height);
-    dibujarSello(ctx, c.width, c.height, lineas());
+    const c = capturar(video, video.videoWidth, video.videoHeight, giro());
+    dibujarSello(c.getContext('2d'), c.width, c.height, lineas());
     alFoto(salida(c));
     n++; contar();
   };

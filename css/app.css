@@ -125,6 +125,24 @@ body.recorrido #mira { display: none; }
   font: 600 13px/1.4 system-ui, sans-serif; pointer-events: none;
 }
 .cam-sello .t { color: #ffb300; font-size: 17px; font-weight: 800; }
+/* teléfono en horizontal: el sello en vivo se gira para verse como saldrá en la foto
+   (esquina inferior izquierda de la vista horizontal) */
+.rot-90 .cam-sello {
+  bottom: auto; left: 10px; top: calc(60px + env(safe-area-inset-top));
+  transform-origin: top left; transform: rotate(90deg) translateY(-100%);
+  max-width: calc(100vh - 220px);
+}
+.rot-270 .cam-sello {
+  left: auto; right: 10px;
+  transform-origin: bottom right; transform: rotate(-90deg) translateX(100%);
+  max-width: calc(100vh - 220px);
+}
+.rot-180 .cam-sello { bottom: auto; left: auto; right: 10px; top: calc(60px + env(safe-area-inset-top)); transform: rotate(180deg); }
+.cam-orient {
+  position: absolute; top: calc(12px + env(safe-area-inset-top)); right: 12px;
+  background: rgba(0,0,0,.6); color: #fff; border: 1px solid rgba(255,255,255,.5);
+  border-radius: 999px; padding: 7px 12px; font-size: 13px; font-weight: 700;
+}
 .cam-barra {
   display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px;
   padding: 16px 16px calc(16px + env(safe-area-inset-bottom)); background: #000;
@@ -139,7 +157,7 @@ body.recorrido #mira { display: none; }
   border: 1px solid rgba(255,255,255,.5); border-radius: 10px; padding: 7px 10px;
 }
 .cam-cont {
-  position: absolute; top: calc(14px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%);
+  position: absolute; top: calc(14px + env(safe-area-inset-top)); left: 12px;
   background: rgba(0,0,0,.65); color: #fff; padding: 5px 14px; border-radius: 999px; font-weight: 700; white-space: nowrap;
 }
 .cam-cont:empty { display: none; }
