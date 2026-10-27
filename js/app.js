@@ -6,7 +6,7 @@ import { leerExif, reducir } from './fotos.js';
 import { iconoElemento, iconoBM, iconoUsuario, miniTipo } from './iconos.js';
 import { abrirCamara, componer, ESTILO_BASE } from './camara.js';
 
-const VERSION_APP = '1.2.0';
+const VERSION_APP = '1.3.0';
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const RAD = Math.PI / 180;
@@ -134,6 +134,11 @@ function dibujarObs() {
       }).addTo(G.obs);
   }
 }
+
+const imagenDe = (src) => { const i = new Image(); i.src = src; return i; };
+const listo = (img) => (img?.complete && img.naturalWidth ? img : null);
+// logo para las fotos: el del celular si se cargó; si no, el del proyecto
+const logoFotos = () => listo(S.logoLocal) || listo(S.logo);
 
 const colorTipo = (t) => (S.tipos[t] || TIPOS_BASE[t] || TIPOS_BASE.OTR)[1];
 const nombreTipo = (t) => (S.tipos[t] || TIPOS_BASE[t] || [t])[0];
@@ -426,8 +431,7 @@ function aplicarDatos(datos) {
   S.eje = datos.eje?.length > 1 ? new Eje(datos.eje, zona, sur) : null;
   S.ejeLL = S.eje ? S.eje.latlngs() : null;
   // logo del supervisor para las fotos (se carga por proyecto desde la página de administración)
-  S.logo = null;
-  if (datos.logo) { S.logo = new Image(); S.logo.src = datos.logo; }
+  S.logo = datos.logo ? imagenDe(datos.logo) : null;
   S.tipos = {};
   for (const t of datos.tipos || []) S.tipos[t.TIPO] = [t.NOMBRE, t.COLOR || '#757575'];
   S.elementos = (datos.elementos || []).filter((e) => e.CODIGO && e.PROG_INI !== '' && e.PROG_INI != null).map((e) => ({
@@ -447,6 +451,9 @@ async function abrirProyecto(id) {
   S.actual = id; await kv.set('actual', id);
   const p = proyActual();
   S.obs = await obsDB.todas(id);
+  // logo cargado en este celular para esta obra (tiene prioridad sobre el del proyecto)
+  const ll = await kv.get('logo:' + id);
+  S.logoLocal = ll ? imagenDe(ll) : null;
   S.encuadrar = true;
   const cache = await kv.get('datos:' + id);
   if (cache) aplicarDatos(cache);
@@ -484,10 +491,16 @@ async function sincronizar() {
   try {
     const A = api(p);
     for (const o of S.obs.filter((x) => x.sync !== 'ok')) {
-      const fotos = (o.fotos || []).filter((f) => f.datos && !f.url).map((f) => ({ id: f.id, nombre: f.nombre, datos: f.datos.split(',')[1] }));
       const { fotos: _, ...resto } = o;
-      const r = await A.enviar('obs_guardar', { obs: { ...resto, fotos: undefined }, fotos });
-      for (const f of o.fotos || []) if (r.fotos?.[f.id]) { f.url = r.fotos[f.id]; delete f.datos; }
+      const obs = { ...resto, fotos: undefined };
+      // las fotos van de a una (son pesadas): si se corta la señal, lo enviado no se repite
+      const porEnviar = (o.fotos || []).filter((f) => f.datos && !f.url);
+      if (!porEnviar.length) await A.enviar('obs_guardar', { obs, fotos: [] });
+      for (const f of porEnviar) {
+        const r = await A.enviar('obs_guardar', { obs, fotos: [{ id: f.id, nombre: f.nombre, datos: f.datos.split(',')[1] }] });
+        if (r.fotos?.[f.id]) { f.url = r.fotos[f.id]; delete f.datos; }
+        await obsDB.guardar(o);
+      }
       o.sync = 'ok';
       await obsDB.guardar(o);
     }
@@ -700,8 +713,9 @@ async function abrirObs(id = null, pre = {}) {
     c.querySelector('#f-fuente').textContent = `Ubicación: ${o.fuente || ''}${o.prec ? ` (±${o.prec} m)` : ''}`;
   };
   const pintarFotos = () => {
-    c.querySelector('#f-fotos').innerHTML = o.fotos.map((f, i) => `<div>${f.mini ? `<img src="${f.mini}" alt="">` : `<a href="${esc(f.url)}" target="_blank" rel="noopener">Ver foto ${i + 1}</a>`}${!f.url ? `<button data-i="${i}" aria-label="Quitar">✕</button>` : ''}</div>`).join('');
+    c.querySelector('#f-fotos').innerHTML = o.fotos.map((f, i) => `<div>${f.mini ? `<img src="${f.mini}" alt="Foto ${i + 1}" data-v="${i}">` : `<a href="${esc(f.url)}" target="_blank" rel="noopener">Ver foto ${i + 1}</a>`}${!f.url ? `<button data-i="${i}" aria-label="Quitar">✕</button>` : ''}</div>`).join('');
     c.querySelectorAll('#f-fotos button').forEach((b) => b.onclick = () => { o.fotos.splice(+b.dataset.i, 1); pintarFotos(); });
+    c.querySelectorAll('#f-fotos img').forEach((im) => im.onclick = () => verFoto(o.fotos[+im.dataset.v]));
     // fotos de galería con GPS en sus datos: se ofrece usar esa ubicación
     const conGps = o.fotos.find((f) => f.exif?.lat != null && !f.url);
     const ex = c.querySelector('#f-exif');
@@ -745,7 +759,7 @@ async function abrirObs(id = null, pre = {}) {
     // posición y eje para el minimapa (sin GPS reciente no se dibuja)
     contexto: () => (S.pos && Date.now() - S.pos.t < 20000 ? { lat: S.pos.lat, lon: S.pos.lon, eje: S.ejeLL } : null),
     opciones: {
-      logo: S.ajustes.fotoLogo && S.logo?.complete && S.logo.naturalWidth ? S.logo : null,
+      logo: S.ajustes.fotoLogo ? logoFotos() : null,
       mapa: S.ajustes.fotoMapa, brujula: S.ajustes.fotoBrujula, estilo: S.ajustes.estiloFoto,
     },
     alFoto: (f) => {
@@ -786,6 +800,27 @@ async function abrirObs(id = null, pre = {}) {
     await sincronizar();
   };
   if (pre.camara) camara();
+}
+
+// Foto a tamaño completo. Si ya se envió, la original está en Drive (el teléfono solo guarda la miniatura).
+function verFoto(f) {
+  if (!f.datos) { if (f.url) window.open(f.url, '_blank', 'noopener'); else mostrarAviso('Esta foto no está disponible'); return; }
+  const v = document.createElement('div');
+  v.id = 'visor';
+  v.innerHTML = `<img src="${f.datos}" alt="Foto">
+    <div class="visor-barra"><span>${f.ancho ? `${f.ancho} × ${f.alto} px` : ''}</span>
+      <button class="btn" id="v-guardar">⬇ Guardar en el teléfono</button><button class="btn primario" id="v-cerrar">Cerrar</button></div>`;
+  document.body.appendChild(v);
+  v.querySelector('#v-cerrar').onclick = () => v.remove();
+  v.querySelector('#v-guardar').onclick = async () => {
+    const blob = await (await fetch(f.datos)).blob();
+    const archivo = new File([blob], f.nombre || 'foto.jpg', { type: 'image/jpeg' });
+    // en el celular se abre "Compartir" (Guardar imagen / Galería / Drive…); si no, se descarga
+    if (navigator.canShare?.({ files: [archivo] })) { await navigator.share({ files: [archivo] }).catch(() => {}); return; }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = archivo.name; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  };
 }
 
 function ponerProg(o, prog, off, fuente) {
@@ -931,8 +966,10 @@ function pantallaSello() {
   const c = hoja('Sello de las fotos', `
     <div class="prev-sello"><canvas id="s-prev" width="720" height="540"></canvas></div>
     <label class="btn" style="display:flex;align-items:center;justify-content:center;margin-top:8px">🖼 Ver sobre una foto mía<input id="s-foto" type="file" accept="image/*" hidden></label>
-    ${grupo('logo', 'Logo', barra('logo', 'Logo') + barra('logoFondo', 'Recuadro blanco'),
-      S.logo ? '' : '<p class="ayuda">Este proyecto aún no tiene logo; se muestra uno de ejemplo.</p>')}
+    ${grupo('logo', 'Logo', barra('logo', 'Logo') + barra('logoFondo', 'Recuadro blanco'), `
+      <p class="ayuda" id="s-logo-estado"></p>
+      <div class="fila"><label class="btn crece" style="display:flex;align-items:center;justify-content:center">📁 Cargar logo de mi empresa<input id="s-logo" type="file" accept="image/png,image/jpeg,image/webp" hidden></label>
+        <button class="btn peligro" id="s-logo-quitar">Quitar</button></div>`)}
     ${grupo('brujula', 'Brújula', barra('brujula', 'Brújula') + barra('brujulaFondo', 'Fondo oscuro'))}
     ${grupo('mapa', 'Minimapa', barra('mapa', 'Minimapa'))}
     <div class="grupo-sello"><label class="campo">Texto</label>${barra('texto', 'Fondo oscuro')}</div>
@@ -942,8 +979,15 @@ function pantallaSello() {
   const prev = c.querySelector('#s-prev'), claves = Object.keys(ESTILO_BASE);
   const leer = () => Object.fromEntries(claves.map((k) => [k, +c.querySelector('#r-' + k).value / 100]));
   const activo = (id) => c.querySelector('#t-' + id).checked;
-  const logo = S.logo?.complete && S.logo.naturalWidth ? S.logo : logoEjemplo();
+  const ejemplo = logoEjemplo();
   let fondo = null, turno = 0;
+  const estadoLogo = () => {
+    c.querySelector('#s-logo-estado').textContent = S.logoLocal ? 'Usando el logo cargado en este celular.'
+      : S.logo ? 'Usando el logo del proyecto (cargado por el administrador).'
+      : 'Aún no hay logo: se muestra uno de ejemplo. Cárgalo aquí o desde la página de administración (para todo el equipo).';
+    c.querySelector('#s-logo-quitar').classList.toggle('oculto', !S.logoLocal);
+  };
+  estadoLogo();
 
   const pintar = async () => {
     const t = ++turno;
@@ -961,7 +1005,7 @@ function pantallaSello() {
       `${new Date().toLocaleString('es-PE', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })} · ${S.ajustes.nombre || 'Usuario'}`,
       proyActual()?.nombre || 'Obra'];
     await componer(cv, {
-      lineas, logo: activo('logo') ? logo : null, rumbo: activo('brujula') ? 245 : null, estilo: leer(),
+      lineas, logo: activo('logo') ? (logoFotos() || ejemplo) : null, rumbo: activo('brujula') ? 245 : null, estilo: leer(),
       mapa: activo('mapa') && S.ejeLL ? { lat: centro.lat, lon: centro.lng, eje: S.ejeLL } : null,
     });
     if (t === turno) prev.getContext('2d').drawImage(cv, 0, 0);
@@ -975,6 +1019,28 @@ function pantallaSello() {
     c.querySelector('#g-' + id).classList.toggle('apagado', !e.target.checked);
     pintar();
   }));
+  // logo desde el celular: se reduce a 600 px (PNG conserva la transparencia) y se guarda por obra
+  c.querySelector('#s-logo').onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    const img = await new Promise((ok) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => ok(null); i.src = URL.createObjectURL(f); });
+    e.target.value = '';
+    if (!img) return mostrarAviso('No se pudo leer la imagen');
+    const k = Math.min(1, 600 / Math.max(img.naturalWidth, img.naturalHeight));
+    const cv = document.createElement('canvas');
+    cv.width = Math.round(img.naturalWidth * k); cv.height = Math.round(img.naturalHeight * k);
+    cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+    const url = cv.toDataURL('image/png');
+    await kv.set('logo:' + S.actual, url);
+    S.logoLocal = imagenDe(url);
+    await S.logoLocal.decode().catch(() => {});
+    c.querySelector('#t-logo').checked = true; c.querySelector('#g-logo').classList.remove('apagado');
+    estadoLogo(); pintar();
+  };
+  c.querySelector('#s-logo-quitar').onclick = async () => {
+    await kv.del('logo:' + S.actual);
+    S.logoLocal = null;
+    estadoLogo(); pintar();
+  };
   c.querySelector('#s-foto').onchange = async (e) => {
     const f = e.target.files[0]; if (!f) return;
     fondo = await new Promise((ok) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => ok(null); i.src = URL.createObjectURL(f); });
@@ -1122,4 +1188,4 @@ async function arrancar() {
   pintarEstado();
 }
 arrancar();
-window.__recorrido = { S, alPosicion, iniciarSim, detenerSim, pausarGPS };
+window.__recorrido = { S, alPosicion, iniciarSim, detenerSim, pausarGPS, sincronizar };

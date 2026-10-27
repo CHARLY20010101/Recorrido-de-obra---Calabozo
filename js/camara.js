@@ -11,7 +11,8 @@
 // Con el sensor de orientación se sabe si el teléfono está en horizontal y la foto se gira
 // para que quede horizontal y con el sello derecho.
 
-const LADO_MAX = 2048;
+const LADO_MAX = 4096; // lado mayor de la foto guardada (≈12 MP en 4:3)
+const CALIDAD_JPEG = .9;
 const RAD = Math.PI / 180;
 
 // Opacidad de cada elemento del sello (0 a 1). El usuario la ajusta en "Sello de las fotos".
@@ -118,8 +119,10 @@ export function dibujarBrujula(ctx, cx, cy, r, rumbo, fondo = ESTILO_BASE.brujul
   ctx.textAlign = 'left';
 }
 
-// ---- minimapa satelital (teselas de Esri a zoom 15, unos 2 km de ancho) ----
-const ZOOM = 15, VISTA = 460; // px del mundo a ese zoom que muestra el minimapa
+// ---- minimapa satelital (teselas de Esri, unos 2 km de ancho) ----
+// En fotos grandes se usa zoom 16 (el doble de detalle) para que el minimapa no se vea pixelado.
+const VISTA15 = 460; // px del mundo a zoom 15 que cubre el minimapa
+const zoomPara = (tam) => (tam > 500 ? 16 : 15);
 const teselas = new Map();
 function tesela(z, x, y) {
   const k = `${z}/${x}/${y}`;
@@ -129,34 +132,39 @@ function tesela(z, x, y) {
   }
   return teselas.get(k);
 }
-const aMundo = (lat, lon) => {
-  const n = 256 * 2 ** ZOOM, s = Math.sin(lat * RAD);
+const aMundo = (lat, lon, z) => {
+  const n = 256 * 2 ** z, s = Math.sin(lat * RAD);
   return [(lon + 180) / 360 * n, (.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * n];
 };
-function teselasDe(lat, lon) {
-  const [cx, cy] = aMundo(lat, lon), izq = cx - VISTA / 2, arr = cy - VISTA / 2, lista = [];
-  for (let tx = Math.floor(izq / 256); tx <= Math.floor((izq + VISTA) / 256); tx++)
-    for (let ty = Math.floor(arr / 256); ty <= Math.floor((arr + VISTA) / 256); ty++) lista.push([tx, ty]);
-  return { izq, arr, lista };
+function teselasDe(lat, lon, z) {
+  const vista = VISTA15 * 2 ** (z - 15);
+  const [cx, cy] = aMundo(lat, lon, z), izq = cx - vista / 2, arr = cy - vista / 2, lista = [];
+  for (let tx = Math.floor(izq / 256); tx <= Math.floor((izq + vista) / 256); tx++)
+    for (let ty = Math.floor(arr / 256); ty <= Math.floor((arr + vista) / 256); ty++) lista.push([tx, ty]);
+  return { izq, arr, lista, vista };
 }
 // descarga anticipada al abrir la cámara, para que la foto salga al instante
-export function precargarMinimapa(lat, lon) { teselasDe(lat, lon).lista.forEach(([x, y]) => tesela(ZOOM, x, y)); }
+export function precargarMinimapa(lat, lon) {
+  for (const z of [15, 16]) teselasDe(lat, lon, z).lista.forEach(([x, y]) => tesela(z, x, y));
+}
 
 async function dibujarMinimapa(ctx, x0, y0, tam, { lat, lon, eje, rumbo }) {
-  const { izq, arr, lista } = teselasDe(lat, lon), s = tam / VISTA;
+  const z = zoomPara(tam), { izq, arr, lista, vista } = teselasDe(lat, lon, z);
+  const t = tam / vista; // escala de las teselas
+  const s = tam / VISTA15; // unidad para grosores y tamaños (diseño a 460 px)
   const espera = new Promise((r) => setTimeout(() => r(null), 2500));
-  const imgs = await Promise.all(lista.map(([x, y]) => Promise.race([tesela(ZOOM, x, y), espera])));
+  const imgs = await Promise.all(lista.map(([x, y]) => Promise.race([tesela(z, x, y), espera])));
   ctx.save();
   rectRedondo(ctx, x0, y0, tam, tam, tam * .05);
   ctx.clip();
   ctx.fillStyle = '#5b6b5a'; ctx.fillRect(x0, y0, tam, tam); // sin señal: fondo liso, el eje se dibuja igual
-  lista.forEach(([tx, ty], i) => { if (imgs[i]) ctx.drawImage(imgs[i], x0 + (tx * 256 - izq) * s, y0 + (ty * 256 - arr) * s, 256 * s, 256 * s); });
+  lista.forEach(([tx, ty], i) => { if (imgs[i]) ctx.drawImage(imgs[i], x0 + (tx * 256 - izq) * t, y0 + (ty * 256 - arr) * t, 256 * t + .5, 256 * t + .5); });
   // eje de la vía
   if (eje?.length) {
     ctx.beginPath();
     let dentro = false;
     for (const [la, lo] of eje) {
-      const [wx, wy] = aMundo(la, lo), px = x0 + (wx - izq) * s, py = y0 + (wy - arr) * s;
+      const [wx, wy] = aMundo(la, lo, z), px = x0 + (wx - izq) * t, py = y0 + (wy - arr) * t;
       const cerca = px > x0 - tam && px < x0 + 2 * tam && py > y0 - tam && py < y0 + 2 * tam;
       if (cerca && dentro) ctx.lineTo(px, py); else if (cerca) ctx.moveTo(px, py);
       dentro = cerca;
@@ -208,17 +216,19 @@ export async function componer(c, { lineas, logo = null, mapa = null, rumbo = nu
 
 // ================= captura y orientación =================
 
-function lienzo(w, h) {
-  const k = Math.min(1, LADO_MAX / Math.max(w, h));
+function lienzo(w, h, max = LADO_MAX) {
+  const k = Math.min(1, max / Math.max(w, h));
   const c = document.createElement('canvas');
   c.width = Math.round(w * k); c.height = Math.round(h * k);
   return c;
 }
 
 // Copia el cuadro girándolo r grados en sentido antihorario (0, 90, 180 o 270)
-export function capturar(fuente, w, h, r = 0) {
+export function capturar(fuente, w, h, r = 0) { return capturarA(fuente, w, h, r, LADO_MAX); }
+
+function capturarA(fuente, w, h, r, max) {
   const girado = r === 90 || r === 270;
-  const c = lienzo(girado ? h : w, girado ? w : h);
+  const c = lienzo(girado ? h : w, girado ? w : h, max);
   const k = c.width / (girado ? h : w);
   const ctx = c.getContext('2d');
   ctx.save();
@@ -266,7 +276,51 @@ function salida(canvas) {
   const m = document.createElement('canvas');
   m.width = Math.round(canvas.width * k); m.height = Math.round(canvas.height * k);
   m.getContext('2d').drawImage(canvas, 0, 0, m.width, m.height);
-  return { datos: canvas.toDataURL('image/jpeg', .85), mini: m.toDataURL('image/jpeg', .7) };
+  return { datos: canvas.toDataURL('image/jpeg', CALIDAD_JPEG), mini: m.toDataURL('image/jpeg', .7), ancho: canvas.width, alto: canvas.height };
+}
+
+// ---- foto completa del sensor (ImageCapture, Android/Chrome) ----
+// takePhoto entrega la foto con la orientación del sensor, que no siempre coincide con la del
+// video. Se compara una huella en gris de ambos para saber cuánto girarla.
+function huella(fuente, w, h, aspecto, n = 24) {
+  // recorte central con el aspecto de referencia, reducido a n × (n/aspecto) y normalizado
+  let cw = w, ch = w / aspecto;
+  if (ch > h) { ch = h; cw = h * aspecto; }
+  const c = document.createElement('canvas');
+  c.width = n; c.height = Math.max(4, Math.round(n / aspecto));
+  const x = c.getContext('2d', { willReadFrequently: true });
+  x.drawImage(fuente, (w - cw) / 2, (h - ch) / 2, cw, ch, 0, 0, c.width, c.height);
+  const d = x.getImageData(0, 0, c.width, c.height).data, g = [];
+  for (let i = 0; i < d.length; i += 4) g.push(.3 * d[i] + .59 * d[i + 1] + .11 * d[i + 2]);
+  const media = g.reduce((s, v) => s + v, 0) / g.length;
+  const desv = Math.sqrt(g.reduce((s, v) => s + (v - media) ** 2, 0) / g.length) || 1;
+  return g.map((v) => (v - media) / desv);
+}
+const diferencia = (a, b) => a.reduce((s, v, i) => s + Math.abs(v - b[i]), 0) / a.length;
+
+// Giro (antihorario) que hace coincidir la foto con el cuadro de referencia (huella ya calculada)
+export function giroParaAlinear(foto, w, h, ref, aspecto) {
+  let mejor = 0, err = Infinity;
+  for (const r of [0, 90, 270, 180]) {
+    const girada = capturarA(foto, w, h, r, 256);
+    const e = diferencia(huella(girada, girada.width, girada.height, aspecto), ref);
+    if (e < err) { err = e; mejor = r; }
+  }
+  return mejor;
+}
+export const huellaDe = (fuente, w, h) => huella(fuente, w, h, w / h);
+
+// Devuelve {fuente, w, h, giro} con el giro (antihorario) que la alinea con el video, o null
+async function fotoCompleta(captura, video) {
+  if (!captura) return null;
+  const aspecto = video.videoWidth / video.videoHeight;
+  const ref = huella(video, video.videoWidth, video.videoHeight, aspecto); // en el instante del disparo
+  const blob = await Promise.race([
+    captura.takePhoto(captura.ajustes || undefined),
+    new Promise((_, mal) => setTimeout(() => mal(new Error('tiempo')), 8000)),
+  ]);
+  const bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+  return { fuente: bmp, w: bmp.width, h: bmp.height, giro: giroParaAlinear(bmp, bmp.width, bmp.height, ref, aspecto) };
 }
 
 // Foto tomada con la cámara del sistema: se reduce y se le imprime el sello
@@ -295,6 +349,7 @@ export function abrirCamara({ lineas, contexto, opciones = {}, alFoto, alCerrar 
   cont.innerHTML = `
     <video playsinline muted autoplay></video>
     <div class="cam-cont"></div>
+    <div class="cam-res"></div>
     <canvas class="cam-brujula oculto" width="120" height="120"></canvas>
     <button class="cam-orient"></button>
     <div class="cam-msg oculto"></div>
@@ -307,7 +362,11 @@ export function abrirCamara({ lineas, contexto, opciones = {}, alFoto, alCerrar 
     </div>`;
   document.body.appendChild(cont);
   const video = cont.querySelector('video'), disparo = cont.querySelector('.cam-disparo');
-  let stream = null, n = 0, pendientes = 0;
+  let stream = null, captura = null, n = 0, pendientes = 0;
+  const resolucion = (w, h, tipo) => {
+    const k = Math.min(1, LADO_MAX / Math.max(w, h)), mp = (w * k) * (h * k) / 1e6;
+    cont.querySelector('.cam-res').textContent = `Calidad: ${mp >= 1 ? Math.round(mp) : mp.toFixed(1)} MP · ${tipo}`;
+  };
 
   // ---- orientación: automática por sensor, o fijada a mano con el botón ----
   let fisico = 0, modo = 'auto';
@@ -392,14 +451,23 @@ export function abrirCamara({ lineas, contexto, opciones = {}, alFoto, alCerrar 
   };
 
   disparo.onclick = async () => {
-    if (!video.videoWidth) return;
+    if (!video.videoWidth || pendientes) return; // una a la vez: la foto completa tarda un momento
     const flash = cont.querySelector('.cam-flash');
     flash.classList.add('on'); setTimeout(() => flash.classList.remove('on'), 60);
     navigator.vibrate?.(40);
-    // el cuadro y los datos se toman en el instante del disparo; el minimapa se compone después
-    const c = capturar(video, video.videoWidth, video.videoHeight, giro()), sello = datosSello();
+    // la orientación y los datos del sello se toman en el instante del disparo
+    const g = giro(), sello = datosSello();
     pendientes++; contar();
     try {
+      let c = null;
+      try {
+        const f = await fotoCompleta(captura, video);
+        if (f) c = capturar(f.fuente, f.w, f.h, (f.giro + g) % 360);
+      } catch {
+        captura = null; // si la foto completa falla, el resto de la sesión se usa el video
+        resolucion(video.videoWidth, video.videoHeight, 'video');
+      }
+      if (!c) c = capturar(video, video.videoWidth, video.videoHeight, g);
       await componer(c, sello);
       alFoto({ ...salida(c), rumbo: sello.rumbo });
       n++;
@@ -423,6 +491,18 @@ export function abrirCamara({ lineas, contexto, opciones = {}, alFoto, alCerrar 
       video.srcObject = stream;
       await video.play().catch(() => {});
       disparo.disabled = false;
+      // foto completa del sensor, a la mayor resolución que ofrezca el teléfono
+      if ('ImageCapture' in window) {
+        try {
+          captura = new ImageCapture(stream.getVideoTracks()[0]);
+          const cap = await captura.getPhotoCapabilities();
+          if (cap?.imageWidth?.max && cap?.imageHeight?.max) {
+            captura.ajustes = { imageWidth: cap.imageWidth.max, imageHeight: cap.imageHeight.max };
+            resolucion(cap.imageWidth.max, cap.imageHeight.max, 'foto completa');
+          } else resolucion(video.videoWidth, video.videoHeight, 'foto completa');
+        } catch { captura = null; }
+      }
+      if (!captura) resolucion(video.videoWidth, video.videoHeight, 'video');
     } catch {
       const m = cont.querySelector('.cam-msg');
       m.textContent = 'No se pudo abrir la cámara dentro de la app (permiso de cámara). Usa «Cámara del teléfono»: la foto también sale con el sello de ubicación.';
