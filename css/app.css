@@ -133,6 +133,40 @@ body.recorrido #mira { display: none; }
 }
 .cam-res:empty { display: none; }
 
+/* pantalla de acceso (inicio de sesión) */
+#acceso {
+  position: fixed; inset: 0; z-index: 1150; background: var(--azul); color: #fff;
+  display: flex; align-items: center; justify-content: center; padding: 24px 20px calc(24px + env(safe-area-inset-bottom));
+  overflow-y: auto;
+}
+.acceso-caja { width: 100%; max-width: 420px; text-align: center; }
+.acceso-caja img { border-radius: 18px; box-shadow: 0 4px 16px rgba(0,0,0,.35); }
+.acceso-caja h1 { margin: 14px 0 4px; font-size: 26px; }
+.acceso-proyecto { margin: 0 0 18px; color: var(--acento); font-weight: 700; }
+.acceso-caja p { line-height: 1.45; }
+.acceso-caja .nota { font-size: 13px; opacity: .8; }
+.acceso-caja .btn { width: 100%; margin-top: 10px; min-height: 54px; font-size: 17px; }
+.acceso-caja .btn.blanco { background: #fff; color: #1f1f1f; border-color: #fff; display: flex; align-items: center; justify-content: center; gap: 10px; }
+.acceso-caja .btn.secundario { background: transparent; color: #fff; border-color: rgba(255,255,255,.5); }
+.acceso-caja .ok { font-size: 46px; line-height: 1; margin: 6px 0; }
+
+/* menú: usuario y solicitudes pendientes */
+.usuario-menu { display: flex; align-items: center; gap: 10px; padding: 10px 12px; margin-bottom: 8px; border-radius: 12px; background: var(--chip); }
+.usuario-menu .s { color: var(--suave); font-size: 13px; }
+#btn-menu { position: relative; }
+#btn-menu[data-n]:not([data-n=""])::after {
+  content: attr(data-n); position: absolute; top: -6px; right: -6px; min-width: 22px; height: 22px; padding: 0 5px;
+  border-radius: 11px; background: var(--mal); color: #fff; font: 700 12px/22px system-ui, sans-serif;
+}
+.usuario-fila { padding: 12px 2px; border-bottom: 1px solid var(--borde); }
+.usuario-fila .t { font-weight: 700; }
+.usuario-fila .s { color: var(--suave); font-size: 13px; word-break: break-all; }
+.usuario-fila .fila { margin-top: 8px; }
+.usuario-fila select { width: auto; flex: 1; padding: 8px; }
+.usuario-fila .btn { min-height: 40px; padding: 0 12px; }
+.grupo-usuarios { margin: 16px 0 4px; font-size: 15px; color: var(--azul); }
+.registro-fila { font-size: 13px; padding: 6px 0; border-bottom: 1px solid var(--borde); }
+
 /* aviso de nueva versión */
 #actualizar {
   position: fixed; left: 12px; right: 12px; bottom: calc(84px + env(safe-area-inset-bottom)); z-index: 1250;

@@ -27,13 +27,9 @@
 
   <div class="tarjeta">
     <h2>1. Conexión</h2>
-    <p class="ayuda">Abre esta página con el <b>enlace de administración</b> (menú «Recorrido de obra» de la hoja de Google) o pega aquí sus datos.</p>
-    <label class="campo" for="url">Dirección del script (termina en /exec)</label>
-    <input id="url" type="text" placeholder="https://script.google.com/macros/s/…/exec">
-    <label class="campo" for="clave">Clave de administración</label>
-    <input id="clave" type="text">
-    <button class="btn primario" id="conectar" style="margin-top:10px">Conectar</button>
-    <div id="r-con" class="res"></div>
+    <p class="ayuda">Esta página usa tu sesión de administrador: inicia sesión en la app (en este mismo navegador) y entra aquí desde el menú ☰ → «Datos del proyecto».</p>
+    <div id="r-con" class="res">Comprobando tu sesión…</div>
+    <a class="btn" href="./" style="display:inline-flex;align-items:center;margin-top:10px;text-decoration:none">← Volver a la app</a>
   </div>
 
   <div class="tarjeta">
@@ -85,33 +81,36 @@
 
 <script type="module">
 import { leerPolilineas, conProgresiva, leerCSV } from './js/dxf.js';
-import { leerEnlace } from './js/api.js';
+import { api } from './js/api.js';
+import { kv } from './js/store.js';
 import { parseProg, fmtProg } from './js/geo.js';
 
 const $ = (s) => document.querySelector(s);
 const res = (id, txt, ok) => { const e = $(id); e.textContent = txt; e.className = 'res ' + (ok ? 'ok' : 'mal'); };
-const inv = leerEnlace(location.hash);
-if (inv) { $('#url').value = inv.url; $('#clave').value = inv.k; history.replaceState(null, '', location.pathname); }
 
-const get = async (a) => {
-  const r = await fetch(`${$('#url').value.trim()}?a=${a}&k=${encodeURIComponent($('#clave').value.trim())}`);
-  const j = await r.json(); if (j.error) throw new Error(j.error); return j;
-};
-const post = async (datos) => {
-  const r = await fetch($('#url').value.trim(), { method: 'POST', body: JSON.stringify({ k: $('#clave').value.trim(), ...datos }) });
-  const j = await r.json(); if (j.error) throw new Error(j.error); return j;
-};
+// Proyecto y sesión: los mismos de la app (mismo navegador). Solo el administrador puede seguir.
+let srv = null;
+const post = (datos) => { const { a, ...resto } = datos; return srv.llamar(a, resto); };
+const get = (a) => srv.llamar(a);
 
-$('#conectar').onclick = async () => {
-  res('#r-con', 'Conectando…', true);
+(async () => {
+  const proyectos = (await kv.get('proyectos')) || [], act = await kv.get('actual');
+  const p = proyectos.find((x) => x.id === act && x.url);
+  const ses = p && await kv.get('sesion:' + p.id);
+  document.querySelectorAll('.tarjeta').forEach((t, i) => { if (i) t.style.display = 'none'; });
+  if (!p) return res('#r-con', 'Abre primero el proyecto en la app (este mismo navegador).');
+  if (!ses?.token) return res('#r-con', `Inicia sesión en la app para el proyecto «${p.nombre}» y vuelve a esta página.`);
+  if (ses.rol !== 'admin') return res('#r-con', 'Tu cuenta no es la del administrador del proyecto.');
+  srv = api(p, ses);
   try {
-    await get('enlace'); // solo responde con la clave de administración
-    const p = await get('proyecto');
-    res('#r-con', `Conectado a «${p.config.NOMBRE}»: eje de ${p.eje.length} vértices, ${p.elementos.length} elementos, ${p.bm.length} BM.`, true);
-    verLogo(p.logo);
-  } catch (e) { res('#r-con', 'No se pudo conectar: ' + e.message); }
-};
-if (inv) $('#conectar').click();
+    const yo = await srv.yo();
+    if (yo.rol !== 'admin') return res('#r-con', 'Tu cuenta no es la del administrador del proyecto.');
+    const d = await get('proyecto');
+    res('#r-con', `Conectado a «${d.config.NOMBRE}» como ${yo.correo}: eje de ${d.eje.length} vértices, ${d.elementos.length} elementos, ${d.bm.length} BM.`, true);
+    verLogo(d.logo);
+    document.querySelectorAll('.tarjeta').forEach((t) => { t.style.display = ''; });
+  } catch (e) { res('#r-con', 'No se pudo conectar: ' + e.message + (e.codigo === 'SESION' ? ' (vuelve a iniciar sesión en la app)' : '')); }
+})();
 
 let polis = [], elegida = null, ejeFinal = null;
 function calcular() {

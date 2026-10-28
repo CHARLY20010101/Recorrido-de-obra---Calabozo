@@ -1,12 +1,12 @@
 // Recorrido de Obra: mapa del eje, progresiva en vivo, avisos y observaciones.
 import { Eje, latLonAUtm, utmALatLon, fmtProg, parseProg, fmtLado, fmtLadoProg } from './geo.js';
 import { kv, obsDB, uid } from './store.js';
-import { api, leerEnlace } from './api.js';
+import { api, leerEnlace, irAGoogle, leerRegreso } from './api.js';
 import { leerExif, reducir } from './fotos.js';
 import { iconoElemento, iconoBM, iconoUsuario, miniTipo } from './iconos.js';
 import { abrirCamara, componer, ESTILO_BASE } from './camara.js';
 
-const VERSION_APP = '1.3.0';
+const VERSION_APP = '2.0.0';
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const RAD = Math.PI / 180;
@@ -35,6 +35,12 @@ const S = {
   audioListo: false, encuadrar: false, mkYo: null, circPrec: null,
 };
 const proyActual = () => S.proyectos.find((p) => p.id === S.actual);
+// conexión con el servidor del proyecto, con la sesión de quien usa el teléfono
+const A = () => api(proyActual(), S.sesion);
+const ROL_NOMBRE = { campo: 'Campo', tecnico: 'Técnico', total: 'Acceso total', admin: 'Administrador' };
+const NIVEL = { campo: 0, tecnico: 1, total: 2, admin: 3 };
+const puede = (rol) => !proyActual()?.url || (NIVEL[S.sesion?.rol] ?? -1) >= NIVEL[rol];
+const autorizado = () => !proyActual()?.url || S.sesion?.estado === 'AUTORIZADO';
 
 // ================= mapa =================
 const mapa = L.map('mapa', { zoomControl: false, attributionControl: true }).setView([-5.1, -78.9], 12);
@@ -447,9 +453,14 @@ function aplicarDatos(datos) {
 }
 
 async function abrirProyecto(id) {
-  detenerSim(false); detenerGPS(); salirDeVia();
+  detenerSim(false); detenerGPS(); salirDeVia(); ocultarAcceso();
   S.actual = id; await kv.set('actual', id);
   const p = proyActual();
+  S.sesion = p.url ? (await kv.get('sesion:' + id)) || null : null;
+  vaciarPantalla();
+  if (p.url && !S.sesion) { pintarEstado(); return mostrarAcceso('login'); }
+  // solicitud aún pendiente: se pregunta al servidor si ya fue autorizada
+  if (p.url && S.sesion.estado !== 'AUTORIZADO' && !(await comprobarAcceso())) return;
   S.obs = await obsDB.todas(id);
   // logo cargado en este celular para esta obra (tiene prioridad sobre el del proyecto)
   const ll = await kv.get('logo:' + id);
@@ -462,14 +473,28 @@ async function abrirProyecto(id) {
   iniciarGPS();
 }
 
+// Deja el mapa sin datos (al cambiar de proyecto o al perder el acceso)
+function vaciarPantalla() {
+  Object.assign(S, { datos: null, eje: null, ejeLL: null, elementos: [], obs: [], logo: null, logoLocal: null, pendientes: 0 });
+  dibujarProyecto();
+  $('#btn-menu').dataset.n = '';
+}
+
 async function actualizarDatos(forzar = false, avisar = false) {
   const p = proyActual();
   if (!p?.url || !navigator.onLine) { if (avisar) mostrarAviso(p?.url ? 'Sin internet: se usan los datos guardados' : 'Proyecto de archivo: no se actualiza desde internet', 'info'); return; }
+  if (!autorizado()) return;
   try {
-    const A = api(p);
-    const v = await A.version();
+    const srv = A();
+    // rol y solicitudes pendientes al día (el administrador puede haberlos cambiado)
+    const yo = await srv.yo();
+    S.sesion = { ...S.sesion, rol: yo.rol, nombre: yo.nombre };
+    S.pendientes = yo.pendientes || 0;
+    $('#btn-menu').dataset.n = S.pendientes || '';
+    await kv.set('sesion:' + p.id, S.sesion);
+    const v = await srv.version();
     if (forzar || v.version !== S.datos?.version) {
-      const d = await A.proyecto();
+      const d = await srv.proyecto();
       await kv.set('datos:' + p.id, d);
       const habia = !!S.datos;
       aplicarDatos(d);
@@ -477,19 +502,149 @@ async function actualizarDatos(forzar = false, avisar = false) {
     } else if (avisar) mostrarAviso('Los datos ya están al día', 'info');
     await sincronizar();
   } catch (e) {
+    if (await manejarAcceso(e)) return;
     pintarEstado('No se pudo conectar');
     if (avisar || !S.datos) mostrarAviso('No se pudo conectar con la hoja del proyecto: ' + e.message);
   }
 }
 setInterval(() => { if (document.visibilityState === 'visible') actualizarDatos(); }, 5 * 60 * 1000);
 
+// ================= acceso: inicio de sesión con Google y autorización del administrador =================
+// Respuestas del servidor que cambian el acceso. Devuelve true si se encargó del error.
+async function manejarAcceso(e) {
+  const id = S.actual;
+  if (e?.codigo === 'SESION') {
+    await kv.del('sesion:' + id); S.sesion = null; detenerGPS(); salirDeVia(); vaciarPantalla();
+    mostrarAcceso('login', e.message); return true;
+  }
+  if (e?.codigo === 'PENDIENTE') {
+    S.sesion = { ...S.sesion, estado: 'PENDIENTE' }; await kv.set('sesion:' + id, S.sesion);
+    detenerGPS(); salirDeVia(); vaciarPantalla(); mostrarAcceso('pendiente'); return true;
+  }
+  if (e?.codigo === 'REVOCADO') { await borrarProyectoLocal(id); mostrarAcceso('revocado'); return true; }
+  if (e?.codigo === 'ACTUALIZAR') { mostrarAviso(e.message); return true; }
+  return false;
+}
+
+// Borra del teléfono los datos de un proyecto: datos, observaciones, sesión y logo propio
+async function borrarProyectoLocal(id, quitarDeLista = false) {
+  for (const k of ['datos:', 'sesion:', 'logo:']) await kv.del(k + id);
+  for (const o of await obsDB.todas(id)) await obsDB.borrar(o.id);
+  if (S.actual === id) { S.sesion = null; detenerGPS(); detenerSim(false); salirDeVia(); vaciarPantalla(); }
+  if (quitarDeLista) { S.proyectos = S.proyectos.filter((x) => x.id !== id); await kv.set('proyectos', S.proyectos); }
+}
+
+function ocultarAcceso() { $('#acceso').classList.add('oculto'); }
+
+function mostrarAcceso(modo, mensaje = '') {
+  const p = proyActual(), c = $('#acceso-cuerpo');
+  $('#acceso').classList.remove('oculto');
+  $('#acceso-proyecto').textContent = p?.nombre || '';
+  const g = '<svg width="20" height="20" viewBox="0 0 48 48" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.8 2.4 30.3 0 24 0 14.6 0 6.6 5.4 2.7 13.3l7.9 6.1C12.5 13.6 17.8 9.5 24 9.5z"/><path fill="#4285F4" d="M46.1 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.4c-.5 2.9-2.2 5.3-4.6 6.9l7.4 5.8c4.3-4 6.9-9.9 6.9-17.2z"/><path fill="#FBBC05" d="M10.6 28.6c-.5-1.4-.8-2.9-.8-4.6s.3-3.2.8-4.6l-7.9-6.1C1 16.6 0 20.2 0 24s1 7.4 2.7 10.7l7.9-6.1z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.4-5.8c-2.1 1.4-4.8 2.2-8.5 2.2-6.2 0-11.5-4.1-13.4-9.8l-7.9 6.1C6.6 42.6 14.6 48 24 48z"/></svg>';
+  const html = {
+    login: `${mensaje ? `<p>${esc(mensaje)}</p>` : ''}
+      <p>Los datos de la obra son privados del equipo de supervisión. Inicia sesión con tu cuenta de Google.</p>
+      <button class="btn blanco" id="ac-login">${g} Iniciar sesión con Google</button>
+      <p class="nota">Si es tu primera vez, tu correo queda como solicitud y el administrador debe autorizarte.</p>`,
+    pendiente: `<div class="ok">✓</div><p><b>Solicitud enviada</b></p>
+      <p>${esc(S.sesion?.correo || '')}</p>
+      <p>El administrador de la supervisión debe autorizar tu acceso. Cuando lo haga, toca «Comprobar».</p>
+      <button class="btn blanco" id="ac-comprobar">Comprobar de nuevo</button>
+      <button class="btn secundario" id="ac-otra">Usar otra cuenta</button>`,
+    revocado: `<p><b>El administrador retiró tu acceso a este proyecto.</b></p>
+      <p>Los datos del proyecto se borraron de este teléfono.</p>
+      <button class="btn secundario" id="ac-otra">Iniciar sesión con otra cuenta</button>`,
+    denegado: `<p><b>Tu cuenta no tiene acceso a este proyecto.</b></p><p>${esc(mensaje)}</p>
+      <button class="btn secundario" id="ac-otra">Usar otra cuenta</button>`,
+    error: `<p>${esc(mensaje)}</p><button class="btn blanco" id="ac-login">Reintentar</button>`,
+  }[modo];
+  c.innerHTML = html + (S.proyectos.length > 1 || modo !== 'login' ? '<button class="btn secundario" id="ac-proyectos">Proyectos</button>' : '');
+  c.querySelector('#ac-login')?.addEventListener('click', iniciarSesion);
+  c.querySelector('#ac-otra')?.addEventListener('click', async () => { await kv.del('sesion:' + S.actual); S.sesion = null; iniciarSesion(); });
+  c.querySelector('#ac-comprobar')?.addEventListener('click', async () => {
+    if (await comprobarAcceso()) abrirProyecto(S.actual);
+  });
+  c.querySelector('#ac-proyectos')?.addEventListener('click', pantallaProyectos);
+}
+
+// Lleva a la página de Google para elegir la cuenta; al volver, terminarLogin completa el acceso
+async function iniciarSesion() {
+  const p = proyActual();
+  if (!p?.url) return;
+  if (!navigator.onLine) return mostrarAviso('Necesitas internet para iniciar sesión');
+  try {
+    const { clientId } = await api(p).info();
+    if (!clientId) return mostrarAcceso('error', 'El administrador aún no configuró el inicio de sesión con Google.');
+    const nonce = uid() + uid() + uid();
+    await kv.set('login', { proyecto: p.id, nonce, t: Date.now() });
+    irAGoogle(clientId, nonce, p.id);
+  } catch (e) { mostrarAcceso('error', 'No se pudo conectar con el servidor del proyecto: ' + e.message); }
+}
+
+async function terminarLogin(regreso) {
+  const pend = await kv.get('login');
+  await kv.del('login');
+  if (!pend || pend.proyecto !== regreso.estado || Date.now() - pend.t > 15 * 60000) {
+    mostrarAviso('El inicio de sesión no se pudo completar. Vuelve a intentarlo.'); return;
+  }
+  const p = S.proyectos.find((x) => x.id === pend.proyecto);
+  if (!p) return;
+  await kv.set('actual', p.id);
+  if (regreso.error) { mostrarAviso('Se canceló el inicio de sesión'); return; }
+  try {
+    const r = await api(p).llamar('login', { id_token: regreso.idToken, nonce: pend.nonce, dispositivo: dispositivo() });
+    if (r.sesion) await kv.set('sesion:' + p.id, { token: r.sesion, correo: r.correo, nombre: r.nombre, rol: r.rol, estado: r.estado });
+    else { S.actual = p.id; mostrarAcceso('denegado', `${r.correo}: acceso ${String(r.estado).toLowerCase()} por el administrador.`); return 'detener'; }
+    if (r.estado === 'AUTORIZADO' && !S.ajustes.nombre) { S.ajustes.nombre = r.nombre; await kv.set('ajustes', S.ajustes); }
+  } catch (e) { mostrarAviso('No se pudo iniciar sesión: ' + e.message); }
+}
+
+const dispositivo = () => {
+  const ua = navigator.userAgent;
+  const so = /iPhone|iPad/.test(ua) ? 'iPhone/iPad' : /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : /Mac/.test(ua) ? 'Mac' : 'Otro';
+  return `${so} · ${matchMedia('(display-mode: standalone)').matches ? 'app instalada' : 'navegador'}`;
+};
+
+// Pregunta al servidor si la sesión ya está autorizada. Devuelve true si se puede continuar.
+async function comprobarAcceso() {
+  if (!navigator.onLine) { mostrarAcceso('pendiente'); mostrarAviso('Sin internet: no se pudo comprobar'); return false; }
+  try {
+    const yo = await A().yo();
+    S.sesion = { ...S.sesion, estado: 'AUTORIZADO', rol: yo.rol, nombre: yo.nombre };
+    await kv.set('sesion:' + S.actual, S.sesion);
+    if (!S.ajustes.nombre) { S.ajustes.nombre = yo.nombre; await kv.set('ajustes', S.ajustes); }
+    ocultarAcceso();
+    return true;
+  } catch (e) {
+    if (!(await manejarAcceso(e))) mostrarAcceso('error', 'No se pudo comprobar el acceso: ' + e.message);
+    return false;
+  }
+}
+
+async function cerrarSesion() {
+  const pend = S.obs.filter((o) => o.sync !== 'ok').length;
+  const msg = pend ? `Tienes ${pend} observaciones sin enviar: se perderán.\n\n¿Cerrar sesión igual?`
+    : 'Al cerrar sesión se borran de este teléfono los datos del proyecto (se vuelven a descargar al entrar).\n\n¿Continuar?';
+  if (!confirm(msg)) return;
+  cerrarHoja();
+  try { await A().llamar('salir'); } catch { /* sin señal: la sesión vence sola */ }
+  await borrarProyectoLocal(S.actual);
+  mostrarAcceso('login');
+}
+
+// En Android, Google puede abrir el inicio de sesión en otra ventana: al volver, se retoma
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState !== 'visible' || !S.actual || $('#acceso').classList.contains('oculto') || S.sesion) return;
+  if (await kv.get('sesion:' + S.actual)) abrirProyecto(S.actual);
+});
+
 let sincronizando = false;
 async function sincronizar() {
   const p = proyActual();
-  if (!p?.url || !navigator.onLine || sincronizando) return;
+  if (!p?.url || !navigator.onLine || sincronizando || !autorizado()) return;
   sincronizando = true;
   try {
-    const A = api(p);
+    const A = api(p, S.sesion);
     for (const o of S.obs.filter((x) => x.sync !== 'ok')) {
       const { fotos: _, ...resto } = o;
       const obs = { ...resto, fotos: undefined };
@@ -517,6 +672,8 @@ async function sincronizar() {
     S.obs = await obsDB.todas(p.id);
     dibujarObs();
   } catch (e) {
+    sincronizando = false;
+    if (await manejarAcceso(e)) return;
     pintarEstado('Envío pendiente');
   } finally { sincronizando = false; pintarEstado(); }
 }
@@ -538,8 +695,13 @@ $('#hoja-cerrar').onclick = cerrarHoja;
 $('#velo').onclick = cerrarHoja;
 
 function menu() {
-  const pend = proyActual()?.url ? S.obs.filter((o) => o.sync !== 'ok').length : 0;
-  const c = hoja('Menú', `<div class="lista-menu">
+  const remoto = !!proyActual()?.url, admin = remoto && S.sesion?.rol === 'admin';
+  const pend = remoto ? S.obs.filter((o) => o.sync !== 'ok').length : 0;
+  const c = hoja('Menú', `${remoto && S.sesion ? `<div class="usuario-menu"><span style="font-size:26px">👤</span>
+      <span><b>${esc(S.sesion.nombre)}</b> · ${esc(ROL_NOMBRE[S.sesion.rol] || S.sesion.rol)}<br><span class="s">${esc(S.sesion.correo)}</span></span></div>` : ''}
+    <div class="lista-menu">
+    ${admin ? `<button data-a="usuarios"><span class="ic">👥</span>Usuarios y permisos${S.pendientes ? `<span class="nota" style="color:var(--mal);font-weight:700">${S.pendientes} por autorizar</span>` : ''}</button>
+    <button data-a="datos"><span class="ic">🛠️</span>Datos del proyecto<span class="nota">eje, elementos, logo</span></button>` : ''}
     <button data-a="buscar"><span class="ic">🔎</span>Ir a una progresiva</button>
     <button data-a="elementos"><span class="ic">🧱</span>Elementos de obra<span class="nota">${S.elementos.length}</span></button>
     <button data-a="obs"><span class="ic">📝</span>Observaciones<span class="nota">${S.obs.filter((o) => o.estado !== 'ANULADA').length}${pend ? ` · ${pend} por enviar` : ''}</span></button>
@@ -550,12 +712,81 @@ function menu() {
     <button data-a="sello"><span class="ic">📷</span>Sello de las fotos</button>
     <button data-a="demo"><span class="ic">🚶</span>Modo demostración${S.sim ? '<span class="nota">en curso</span>' : ''}</button>
     <button data-a="ayuda"><span class="ic">❓</span>Cómo se usa</button>
+    ${remoto && S.sesion ? '<button data-a="salir"><span class="ic">🔒</span>Cerrar sesión</button>' : ''}
   </div><p class="ayuda" style="text-align:center;margin-top:14px">Recorrido de Obra v${VERSION_APP}</p>`);
-  c.querySelectorAll('button').forEach((b) => b.onclick = () => ({
+  c.querySelectorAll('.lista-menu button').forEach((b) => b.onclick = () => ({
     buscar: pantallaBuscar, elementos: pantallaElementos, obs: pantallaObs, proyectos: pantallaProyectos,
     gps: () => { cerrarHoja(); pausarGPS(!S.pausado); },
     actualizar: () => { cerrarHoja(); actualizarDatos(true, true); }, ajustes: pantallaAjustes, sello: pantallaSello, demo: pantallaDemo, ayuda: pantallaAyuda,
+    usuarios: pantallaUsuarios, datos: () => { location.href = 'admin.html'; }, salir: cerrarSesion,
   })[b.dataset.a]());
+}
+
+// ---- usuarios y permisos (solo administrador) ----
+const fechaCorta = (v) => (v ? new Date(v).toLocaleString('es-PE', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—');
+
+async function pantallaUsuarios() {
+  const c = hoja('Usuarios y permisos', '<p class="ayuda">Cargando…</p>');
+  let lista;
+  try { lista = (await A().llamar('usuarios')).usuarios; } catch (e) {
+    if (!(await manejarAcceso(e))) c.innerHTML = `<p class="ayuda">No se pudo cargar: ${esc(e.message)}</p>`;
+    return;
+  }
+  S.pendientes = lista.filter((u) => u.estado === 'PENDIENTE').length;
+  $('#btn-menu').dataset.n = S.pendientes || '';
+  const roles = (sel) => Object.entries(ROL_NOMBRE).filter(([k]) => k !== 'admin')
+    .map(([k, t]) => `<option value="${k}" ${k === sel ? 'selected' : ''}>${t}</option>`).join('');
+  const fila = (u) => `<div class="usuario-fila" data-c="${esc(u.correo)}">
+    <div class="t">${esc(u.nombre || u.correo)}${u.principal ? ' <span class="etq ok">administrador principal</span>' : ''}</div>
+    <div class="s">${esc(u.correo)}</div>
+    <div class="s">${u.estado === 'PENDIENTE' ? `Solicitó acceso: ${fechaCorta(u.solicitado)}` : `Último acceso: ${fechaCorta(u.ultimoAcceso)}`}</div>
+    ${u.principal ? '' : {
+      PENDIENTE: `<div class="fila"><select data-rol>${roles('campo')}</select><button class="btn primario" data-est="AUTORIZADO">Autorizar</button><button class="btn peligro" data-est="RECHAZADO">Rechazar</button></div>`,
+      AUTORIZADO: `<div class="fila"><select data-rol data-cambia>${roles(u.rol)}</select><button class="btn peligro" data-est="DESACTIVADO">Desactivar</button></div>`,
+      DESACTIVADO: `<div class="fila"><select data-rol>${roles(u.rol)}</select><button class="btn" data-est="AUTORIZADO">Reactivar</button></div>`,
+      RECHAZADO: `<div class="fila"><select data-rol>${roles(u.rol)}</select><button class="btn" data-est="AUTORIZADO">Autorizar</button></div>`,
+    }[u.estado] || ''}</div>`;
+  const grupo = (est, titulo) => {
+    const g = lista.filter((u) => u.estado === est);
+    return g.length ? `<h3 class="grupo-usuarios">${titulo} (${g.length})</h3>${g.map(fila).join('')}` : '';
+  };
+  c.innerHTML = `<p class="ayuda">Quien abre la app e inicia sesión por primera vez aparece aquí como solicitud.
+      <b>Campo</b>: mapa, recorrido y observaciones · <b>Técnico</b>: + secciones y metrados · <b>Acceso total</b>: toda la información.</p>
+    ${grupo('PENDIENTE', 'Solicitudes por autorizar') || '<p class="ayuda">No hay solicitudes pendientes.</p>'}
+    ${grupo('AUTORIZADO', 'Autorizados')}${grupo('DESACTIVADO', 'Desactivados')}${grupo('RECHAZADO', 'Rechazados')}
+    <div class="botones"><button class="btn" id="u-registro">Registro de accesos</button><button class="btn peligro" id="u-cerrar">Cerrar todas las sesiones</button></div>`;
+
+  const actualizar = async (correo, estado, rol) => {
+    try {
+      await A().llamar('usuario_actualizar', { correo, estado, rol });
+      mostrarAviso(estado === 'AUTORIZADO' ? 'Acceso autorizado' : estado ? 'Acceso actualizado' : 'Rol actualizado', 'info');
+    } catch (e) { if (!(await manejarAcceso(e))) mostrarAviso('No se pudo actualizar: ' + e.message); }
+    pantallaUsuarios();
+  };
+  c.querySelectorAll('.usuario-fila[data-c]').forEach((f) => {
+    const correo = f.dataset.c, sel = f.querySelector('[data-rol]');
+    f.querySelectorAll('[data-est]').forEach((b) => b.onclick = () => {
+      const est = b.dataset.est;
+      if ((est === 'DESACTIVADO' || est === 'RECHAZADO') && !confirm(`¿${est === 'DESACTIVADO' ? 'Desactivar' : 'Rechazar'} a ${correo}?\n\nPierde el acceso y, en su próxima conexión, se borran los datos de su teléfono.`)) return;
+      actualizar(correo, est, sel?.value);
+    });
+    if (sel?.dataset.cambia !== undefined) sel.onchange = () => actualizar(correo, '', sel.value);
+  });
+  c.querySelector('#u-registro').onclick = pantallaRegistro;
+  c.querySelector('#u-cerrar').onclick = async () => {
+    if (!confirm('Se cerrarán las sesiones de todos los demás usuarios. Tendrán que volver a iniciar sesión. ¿Continuar?')) return;
+    try { const r = await A().llamar('cerrar_sesiones'); mostrarAviso(`Se cerraron ${r.cerradas} sesiones`, 'info'); }
+    catch (e) { if (!(await manejarAcceso(e))) mostrarAviso('No se pudo: ' + e.message); }
+  };
+}
+
+async function pantallaRegistro() {
+  const c = hoja('Registro de accesos', '<p class="ayuda">Cargando…</p>', pantallaUsuarios);
+  try {
+    const { registro } = await A().llamar('registro', { n: 300 });
+    c.innerHTML = `<p class="ayuda">Últimos ${registro.length} movimientos (el registro completo está en la hoja REGISTRO).</p>` +
+      registro.map((r) => `<div class="registro-fila"><b>${fechaCorta(r.FECHA)}</b> · ${esc(r.CORREO)}<br>${esc(r.ACCION)}${r.DETALLE ? ` <span class="ayuda">${esc(r.DETALLE)}</span>` : ''}</div>`).join('');
+  } catch (e) { if (!(await manejarAcceso(e))) c.innerHTML = `<p class="ayuda">No se pudo cargar: ${esc(e.message)}</p>`; }
 }
 
 function pantallaBuscar() {
@@ -713,9 +944,9 @@ async function abrirObs(id = null, pre = {}) {
     c.querySelector('#f-fuente').textContent = `Ubicación: ${o.fuente || ''}${o.prec ? ` (±${o.prec} m)` : ''}`;
   };
   const pintarFotos = () => {
-    c.querySelector('#f-fotos').innerHTML = o.fotos.map((f, i) => `<div>${f.mini ? `<img src="${f.mini}" alt="Foto ${i + 1}" data-v="${i}">` : `<a href="${esc(f.url)}" target="_blank" rel="noopener">Ver foto ${i + 1}</a>`}${!f.url ? `<button data-i="${i}" aria-label="Quitar">✕</button>` : ''}</div>`).join('');
-    c.querySelectorAll('#f-fotos button').forEach((b) => b.onclick = () => { o.fotos.splice(+b.dataset.i, 1); pintarFotos(); });
-    c.querySelectorAll('#f-fotos img').forEach((im) => im.onclick = () => verFoto(o.fotos[+im.dataset.v]));
+    c.querySelector('#f-fotos').innerHTML = o.fotos.map((f, i) => `<div>${f.mini ? `<img src="${f.mini}" alt="Foto ${i + 1}" data-v="${i}">` : `<a href="#" data-v="${i}">Ver foto ${i + 1}</a>`}${!f.url ? `<button data-i="${i}" aria-label="Quitar">✕</button>` : ''}</div>`).join('');
+    c.querySelectorAll('#f-fotos [data-i]').forEach((b) => b.onclick = () => { o.fotos.splice(+b.dataset.i, 1); pintarFotos(); });
+    c.querySelectorAll('#f-fotos [data-v]').forEach((im) => im.onclick = (ev) => { ev.preventDefault(); verFoto(o.fotos[+im.dataset.v]); });
     // fotos de galería con GPS en sus datos: se ofrece usar esa ubicación
     const conGps = o.fotos.find((f) => f.exif?.lat != null && !f.url);
     const ex = c.querySelector('#f-exif');
@@ -802,18 +1033,34 @@ async function abrirObs(id = null, pre = {}) {
   if (pre.camara) camara();
 }
 
-// Foto a tamaño completo. Si ya se envió, la original está en Drive (el teléfono solo guarda la miniatura).
-function verFoto(f) {
-  if (!f.datos) { if (f.url) window.open(f.url, '_blank', 'noopener'); else mostrarAviso('Esta foto no está disponible'); return; }
+// Foto a tamaño completo. Si ya se envió, el teléfono solo guarda la miniatura: la original se pide
+// al servidor del proyecto (solo usuarios autorizados; la carpeta de Drive no se comparte con nadie).
+async function verFoto(f) {
+  let datos = f.datos;
+  if (!datos && f.url) {
+    const id = (String(f.url).match(/\/d\/([\w-]+)/) || [])[1];
+    if (!id || !proyActual()?.url) return mostrarAviso('Esta foto no está disponible');
+    if (!navigator.onLine) return mostrarAviso('Sin internet: la foto original está en el servidor del proyecto');
+    mostrarAviso('Descargando la foto…', 'info');
+    try {
+      const r = await A().llamar('foto', { id });
+      datos = `data:${r.tipo};base64,${r.datos}`;
+      f.nombre = f.nombre || r.nombre;
+    } catch (e) { if (!(await manejarAcceso(e))) mostrarAviso('No se pudo descargar la foto: ' + e.message); return; }
+    $('#aviso').classList.add('oculto');
+  }
+  if (!datos) return mostrarAviso('Esta foto no está disponible');
   const v = document.createElement('div');
   v.id = 'visor';
-  v.innerHTML = `<img src="${f.datos}" alt="Foto">
-    <div class="visor-barra"><span>${f.ancho ? `${f.ancho} × ${f.alto} px` : ''}</span>
+  v.innerHTML = `<img src="${datos}" alt="Foto">
+    <div class="visor-barra"><span></span>
       <button class="btn" id="v-guardar">⬇ Guardar en el teléfono</button><button class="btn primario" id="v-cerrar">Cerrar</button></div>`;
   document.body.appendChild(v);
+  const img = v.querySelector('img');
+  img.onload = () => { v.querySelector('.visor-barra span').textContent = `${img.naturalWidth} × ${img.naturalHeight} px`; };
   v.querySelector('#v-cerrar').onclick = () => v.remove();
   v.querySelector('#v-guardar').onclick = async () => {
-    const blob = await (await fetch(f.datos)).blob();
+    const blob = await (await fetch(datos)).blob();
     const archivo = new File([blob], f.nombre || 'foto.jpg', { type: 'image/jpeg' });
     // en el celular se abre "Compartir" (Guardar imagen / Galería / Drive…); si no, se descarga
     if (navigator.canShare?.({ files: [archivo] })) { await navigator.share({ files: [archivo] }).catch(() => {}); return; }
@@ -832,7 +1079,7 @@ function ponerProg(o, prog, off, fuente) {
 function pantallaProyectos() {
   const c = hoja('Proyectos', `
     <div id="p-lista">${S.proyectos.map((p) => `<div class="item"><span class="punto" style="background:${p.id === S.actual ? '#2e7d32' : '#c5ccd3'}"></span>
-      <span class="crece"><span class="t">${esc(p.nombre)}</span><br><span class="s">${p.url ? 'Conectado a su hoja de Google' : 'Abierto desde archivo (solo en este teléfono)'}</span></span>
+      <span class="crece"><span class="t">${esc(p.nombre)}</span><br><span class="s">${p.url ? (p.id === S.actual && S.sesion?.correo ? `Sesión: ${esc(S.sesion.correo)}` : 'Servidor de la supervisión (requiere iniciar sesión)') : 'Abierto desde archivo (solo en este teléfono)'}</span></span>
       <span class="der">${p.id === S.actual ? '<span class="etq ok">en uso</span>' : `<button class="btn" data-usar="${p.id}">Usar</button>`}<br>
       <button class="btn peligro" data-quitar="${p.id}" style="margin-top:6px;min-height:36px">Quitar</button></span></div>`).join('') || '<p class="ayuda">Aún no tienes proyectos.</p>'}</div>
     <label class="campo" for="p-enlace">Agregar proyecto con su enlace</label>
@@ -845,13 +1092,13 @@ function pantallaProyectos() {
     const p = S.proyectos.find((x) => x.id === b.dataset.quitar);
     const pend = (await obsDB.todas(p.id)).filter((o) => o.sync !== 'ok').length;
     if (!confirm(`¿Quitar "${p.nombre}" de este teléfono?${pend ? `\n\nOJO: tiene ${pend} observaciones sin enviar que se perderán.` : ''}`)) return;
-    S.proyectos = S.proyectos.filter((x) => x.id !== p.id);
-    await kv.set('proyectos', S.proyectos); await kv.del('datos:' + p.id);
-    for (const o of await obsDB.todas(p.id)) await obsDB.borrar(o.id);
-    if (S.actual === p.id) {
-      detenerSim(false); detenerGPS(); salirDeVia();
-      S.actual = null; S.datos = null; S.eje = null; S.elementos = []; S.obs = []; dibujarProyecto();
-      if (S.proyectos[0]) await abrirProyecto(S.proyectos[0].id);
+    const ses = await kv.get('sesion:' + p.id);
+    if (ses && navigator.onLine) { try { await api(p, ses).llamar('salir'); } catch { /* la sesión vence sola */ } }
+    const eraActual = S.actual === p.id;
+    await borrarProyectoLocal(p.id, true);
+    if (eraActual) {
+      S.actual = null; ocultarAcceso();
+      if (S.proyectos[0]) await abrirProyecto(S.proyectos[0].id); else { cerrarHoja(); return bienvenida(); }
     }
     pantallaProyectos();
   });
@@ -871,10 +1118,9 @@ function pantallaProyectos() {
 
 async function agregarProyecto(d) {
   let p = S.proyectos.find((x) => x.url === d.url);
-  if (p) { p.k = d.k; p.nombre = d.nombre; }
-  else { p = { id: uid(), ...d }; S.proyectos.push(p); }
+  if (p) { p.nombre = d.nombre; delete p.k; }
+  else { p = { id: uid(), nombre: d.nombre, url: d.url }; S.proyectos.push(p); }
   await kv.set('proyectos', S.proyectos);
-  mostrarAviso(`Proyecto "${p.nombre}" agregado. Descargando datos…`, 'info');
   await abrirProyecto(p.id);
 }
 
@@ -1171,10 +1417,16 @@ async function arrancar() {
     await kv.set('version_app', VERSION_APP);
     if (vPrev) setTimeout(() => mostrarAviso(`App actualizada a la versión ${VERSION_APP}`, 'info'), 1500);
   }
+  // la dirección puede traer: el regreso de Google (#id_token=…), un enlace de proyecto (#p=…) o un archivo
+  const regreso = leerRegreso(location.hash);
   const inv = leerEnlace(location.hash);
   const archivo = location.hash.match(/#archivo=(.+)$/);
-  history.replaceState(null, '', location.pathname + location.search);
-  if (inv) {
+  history.replaceState(null, '', location.pathname + location.search); // el token no queda en la dirección
+  if (regreso) {
+    const r = await terminarLogin(regreso);
+    const act = await kv.get('actual');
+    if (r !== 'detener' && S.proyectos.some((p) => p.id === act)) await abrirProyecto(act);
+  } else if (inv) {
     await agregarProyecto(inv);
   } else if (archivo) {
     try { await agregarArchivo(await (await fetch(decodeURIComponent(archivo[1]))).json()); } catch { mostrarAviso('No se pudo abrir el archivo del proyecto'); }
@@ -1184,8 +1436,8 @@ async function arrancar() {
     if (id) await abrirProyecto(id);
   }
   if (!S.proyectos.length) bienvenida();
-  else if (!S.ajustes.nombre) pantallaNombre();
+  else if (!S.ajustes.nombre && autorizado() && $('#acceso').classList.contains('oculto')) pantallaNombre();
   pintarEstado();
 }
 arrancar();
-window.__recorrido = { S, alPosicion, iniciarSim, detenerSim, pausarGPS, sincronizar };
+window.__recorrido = { S, alPosicion, iniciarSim, detenerSim, pausarGPS, sincronizar, abrirProyecto };
