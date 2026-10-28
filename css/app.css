@@ -28,7 +28,7 @@ button { font: inherit; cursor: pointer; }
 }
 #fila-prog { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
 #etq-prog { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; opacity: .75; }
-#prog { font-size: 44px; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+#prog { cursor: pointer; font-size: 44px; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
 #prog.vivo { color: var(--acento); }
 #lado { font-size: 20px; font-weight: 600; text-align: right; padding-bottom: 4px; }
 .der-prog { text-align: right; }
@@ -51,7 +51,7 @@ body:not(.recorrido) #sentido { display: none; }
 /* ---- mapa ---- */
 #mapa { flex: 1; min-height: 0; background: #dfe6ea; }
 #mira {
-  position: fixed; left: 50%; top: 50%; width: 28px; height: 28px; margin: -14px 0 0 -14px;
+  position: absolute; left: 50%; top: 50%; width: 28px; height: 28px; margin: -14px 0 0 -14px;
   pointer-events: none; z-index: 500; opacity: .8;
   background:
     linear-gradient(#000,#000) center/2px 100% no-repeat,
@@ -166,6 +166,29 @@ body.recorrido #mira { display: none; }
 .usuario-fila .btn { min-height: 40px; padding: 0 12px; }
 .grupo-usuarios { margin: 16px 0 4px; font-size: 15px; color: var(--azul); }
 .registro-fila { font-size: 13px; padding: 6px 0; border-bottom: 1px solid var(--borde); }
+
+/* puntos de control */
+.mk-punto svg { filter: drop-shadow(0 1px 2px rgba(0,0,0,.6)); display: block; }
+.etq-punto {
+  position: absolute; left: 50%; top: 100%; transform: translateX(-50%); white-space: nowrap; margin-top: 1px;
+  font: 700 11px system-ui, sans-serif; color: #000; text-shadow: 0 0 3px #fff, 0 0 3px #fff, 0 0 3px #fff; display: none;
+}
+.cerca .etq-punto { display: block; }
+/* en listas y popups (fondo claro) el triángulo va sin borde blanco */
+.ico-punto svg { display: inline-block; vertical-align: -3px; }
+.ico-punto svg path { stroke: none; }
+
+/* ficha de progresiva */
+.ficha-cab { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
+.ficha-cab .pasos { display: flex; gap: 6px; }
+.ficha-cab .pasos button { min-height: 38px; padding: 0 10px; border-radius: 10px; border: 1px solid var(--borde); background: #fff; font-weight: 700; color: var(--azul); }
+.ficha-t { margin: 18px 0 6px; font-size: 16px; color: var(--azul); border-bottom: 2px solid var(--chip); padding-bottom: 4px; }
+.tabla { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 8px; }
+.tabla td { padding: 6px 4px; border-bottom: 1px solid var(--borde); vertical-align: top; }
+.tabla td:last-child { text-align: right; font-weight: 700; white-space: nowrap; }
+.tabla tr.total td { border-top: 2px solid var(--azul); }
+.aviso-linea { background: #fff8e1; border-left: 4px solid var(--acento); padding: 8px 10px; border-radius: 6px; font-size: 14px; }
+.aviso-linea.mal { background: #fdecea; border-left-color: var(--mal); }
 
 /* aviso de nueva versión */
 #actualizar {

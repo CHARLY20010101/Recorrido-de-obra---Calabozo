@@ -46,6 +46,26 @@ export function iconoElemento(tipo, color) {
 export const miniTipo = (tipo, color, tam = 26) =>
   `<span class="ie-mini" style="background:${color};width:${tam}px;height:${tam}px">${svgTipo(tipo, Math.round(tam * .68))}</span>`;
 
+// Punto de control: triángulo topográfico. Geodésico = azul con centro blanco; BM = negro.
+// Observado = rojo; reemplazado o anulado = gris. La etiqueta con el código se ve de cerca.
+// Triángulo del punto: azul = geodésico, negro = BM, rojo = observado, gris = anulado o reemplazado
+export function svgPunto(tipo, estado, t) {
+  const geo = tipo === 'GEODESICO';
+  const color = estado === 'OBSERVADO' ? '#c62828' : estado === 'ANULADO' || estado === 'REEMPLAZADO' ? '#9e9e9e' : geo ? '#1565c0' : '#111';
+  t = t ?? (geo ? 24 : 18);
+  return `<svg viewBox="0 0 20 20" width="${t}" height="${t}" aria-hidden="true"><path d="M10 2 18.5 17h-17z" fill="${color}" stroke="#fff" stroke-width="2" stroke-linejoin="round"/><circle cx="10" cy="12" r="${geo ? 2.6 : 1.8}" fill="#fff"/></svg>`;
+}
+
+export function iconoPunto(tipo, estado, codigo) {
+  const t = tipo === 'GEODESICO' ? 24 : 18;
+  const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  return L.divIcon({
+    className: 'mk-punto',
+    html: `${svgPunto(tipo, estado, t)}<span class="etq-punto">${esc(codigo)}</span>`,
+    iconSize: [t, t], iconAnchor: [t / 2, t * .58], popupAnchor: [0, -t / 2],
+  });
+}
+
 // Punto de control (BM): triángulo topográfico
 export function iconoBM() {
   return L.divIcon({

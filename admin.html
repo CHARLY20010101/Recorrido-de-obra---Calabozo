@@ -51,9 +51,16 @@
     <h2>3. Elementos de obra y BM</h2>
     <p class="ayuda">Lo habitual es editar la hoja <b>ELEMENTOS</b> directamente en Google Sheets: cambia una progresiva o agrega una fila, y la app del equipo se actualiza sola. Usa esta carga solo para reemplazar la tabla completa desde un CSV.</p>
     <p class="ayuda">Columnas de ELEMENTOS: CODIGO, TIPO, PROG_INI, PROG_FIN, LADO (LI/LD), DESCRIPCION, ESTADO, OBS. Columnas de BM: CODIGO, E, N, PROG, DIST_EJE.</p>
+    <p class="ayuda">PUNTOS (red de control): CODIGO, CODIGO_ANTERIOR, TIPO (GEODESICO/BM/PC/OTRO), ORDEN, E, N, COTA, ESTADO (VIGENTE/OBSERVADO/REEMPLAZADO/ANULADO), FUENTE, FECHA, OBS.
+      Cuando llegue la red nueva del contratista, pon su código en CODIGO y el antiguo en CODIGO_ANTERIOR.</p>
+    <p class="ayuda">SECCION_TIPICA: NOMBRE, PROG_INI, PROG_FIN, CARRIL_M, BERMA_M, BOMBEO_PCT, CUNETA_ANCHO_M, CUNETA_PROF_M, CAPAS («TS capa 2:1.0; Base:20; …», en cm, de arriba hacia abajo), TALUD_CORTE, TALUD_RELLENO, FUENTE, OBS.</p>
     <div class="fila">
       <label class="btn crece" style="display:flex;align-items:center;justify-content:center">CSV de ELEMENTOS<input id="f-elem" type="file" accept=".csv" hidden></label>
-      <label class="btn crece" style="display:flex;align-items:center;justify-content:center">CSV de BM<input id="f-bm" type="file" accept=".csv" hidden></label>
+      <label class="btn crece" style="display:flex;align-items:center;justify-content:center">CSV de PUNTOS<input id="f-pts" type="file" accept=".csv" hidden></label>
+    </div>
+    <div class="fila" style="margin-top:8px">
+      <label class="btn crece" style="display:flex;align-items:center;justify-content:center">CSV de SECCIÓN TÍPICA<input id="f-sec" type="file" accept=".csv" hidden></label>
+      <label class="btn crece" style="display:flex;align-items:center;justify-content:center">CSV de BM (antiguo)<input id="f-bm" type="file" accept=".csv" hidden></label>
     </div>
     <div id="r-tab" class="res"></div>
   </div>
@@ -172,6 +179,8 @@ const subirCSV = (hoja) => async (e) => {
 };
 $('#f-elem').onchange = subirCSV('ELEMENTOS');
 $('#f-bm').onchange = subirCSV('BM');
+$('#f-pts').onchange = subirCSV('PUNTOS');
+$('#f-sec').onchange = subirCSV('SECCION_TIPICA');
 
 // ---- logo: se reduce a 600 px como máximo (PNG conserva la transparencia) ----
 function verLogo(src) {

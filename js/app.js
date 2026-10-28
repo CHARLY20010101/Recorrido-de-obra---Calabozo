@@ -3,10 +3,11 @@ import { Eje, latLonAUtm, utmALatLon, fmtProg, parseProg, fmtLado, fmtLadoProg }
 import { kv, obsDB, uid } from './store.js';
 import { api, leerEnlace, irAGoogle, leerRegreso } from './api.js';
 import { leerExif, reducir } from './fotos.js';
-import { iconoElemento, iconoBM, iconoUsuario, miniTipo } from './iconos.js';
+import { iconoElemento, iconoPunto, iconoUsuario, miniTipo, svgPunto } from './iconos.js';
+import { leerSecciones, seccionEn, svgSeccion } from './seccion.js';
 import { abrirCamara, componer, ESTILO_BASE } from './camara.js';
 
-const VERSION_APP = '2.0.1';
+const VERSION_APP = '2.1.0';
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const RAD = Math.PI / 180;
@@ -28,7 +29,7 @@ const TIPOS_BASE = {
 };
 
 const S = {
-  proyectos: [], actual: null, datos: null, eje: null, tipos: {}, elementos: [],
+  proyectos: [], actual: null, datos: null, eje: null, tipos: {}, elementos: [], puntos: [], secciones: [],
   ajustes: { ...AJUSTES_BASE }, obs: [],
   pos: null, u: null, watch: null, pausado: false, gpsError: '', enVia: false, seguir: true, sim: null, wake: null,
   hist: [], dir: 1, ultTramo: null, avisados: new Set(), fueraCont: 0, avisoFuera: false,
@@ -44,6 +45,10 @@ const autorizado = () => !proyActual()?.url || S.sesion?.estado === 'AUTORIZADO'
 
 // ================= mapa =================
 const mapa = L.map('mapa', { zoomControl: false, attributionControl: true }).setView([-5.1, -78.9], 12);
+// la mira va dentro del mapa: así marca el centro real aunque la barra de arriba cambie de alto
+mapa.getContainer().appendChild($('#mira'));
+// si la barra de arriba crece o se achica, el mapa recalcula su centro sin moverse del punto que mirabas
+if (window.ResizeObserver) new ResizeObserver(() => mapa.invalidateSize({ animate: false })).observe(mapa.getContainer());
 const capasBase = {
   'Satélite': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
     maxZoom: 19, maxNativeZoom: 18, crossOrigin: 'anonymous', attribution: 'Imágenes © Esri, Maxar, Earthstar Geographics',
@@ -57,14 +62,18 @@ const G = {
   eje: L.layerGroup().addTo(mapa), km: L.layerGroup().addTo(mapa), cien: L.layerGroup(),
   elem: L.layerGroup().addTo(mapa), bm: L.layerGroup(), obs: L.layerGroup().addTo(mapa), yo: L.layerGroup().addTo(mapa),
 };
+G.marca = L.layerGroup().addTo(mapa); // punto de la ficha de progresiva abierta
 L.control.layers(capasBase, {
-  'Elementos de obra': G.elem, 'Observaciones': G.obs, 'BM / puntos de control': G.bm, 'Marcas cada 100 m': G.cien,
+  'Elementos de obra': G.elem, 'Observaciones': G.obs, 'Puntos de control (BM)': G.bm, 'Marcas cada 100 m': G.cien,
 }, { position: 'topright' }).addTo(mapa);
 L.control.zoom({ position: 'topleft' }).addTo(mapa);
 L.control.scale({ imperial: false, position: 'bottomleft' }).addTo(mapa);
 let cienAuto = true;
 mapa.on('overlayremove', (e) => { if (e.layer === G.cien) cienAuto = false; });
-const zoomClases = () => mapa.getContainer().classList.toggle('lejos', mapa.getZoom() < 14);
+const zoomClases = () => {
+  mapa.getContainer().classList.toggle('lejos', mapa.getZoom() < 14);
+  mapa.getContainer().classList.toggle('cerca', mapa.getZoom() >= 16);
+};
 mapa.on('zoomend', zoomClases);
 zoomClases();
 mapa.on('zoomend', () => {
@@ -80,7 +89,7 @@ function dibujarProyecto() {
   const ll = S.ejeLL;
   L.polyline(ll, { color: '#000', weight: 7, opacity: .55, interactive: false }).addTo(G.eje);
   L.polyline(ll, { color: '#ffd54f', weight: 4, opacity: 1 }).addTo(G.eje)
-    .on('click', (e) => { const u = ubicarLatLon(e.latlng.lat, e.latlng.lng); L.popup().setLatLng(e.latlng).setContent(`<h3>Km ${fmtProg(u.prog)}</h3>Eje de la vía`).openOn(mapa); });
+    .on('click', (e) => fichaProgresiva(ubicarLatLon(e.latlng.lat, e.latlng.lng).prog));
   const ini = Math.ceil(S.eje.inicio / 100) * 100;
   for (let p = ini; p <= S.eje.fin; p += 100) {
     const pt = S.eje.puntoLatLon(p);
@@ -102,12 +111,173 @@ function dibujarProyecto() {
     e.capa = L.marker(S.eje.puntoLatLon(p, off), { icon: iconoElemento(e.tipo, color), title: `${e.codigo} · ${e.desc}`, riseOnHover: true })
       .bindPopup(() => popupElemento(e)).addTo(G.elem);
   }
-  for (const b of S.datos.bm || []) {
-    const [lat, lon] = utmALatLon(+b.E, +b.N, S.eje.zona, S.eje.sur);
-    L.marker([lat, lon], { icon: iconoBM() })
-      .bindPopup(`<h3>${esc(b.CODIGO)}</h3>Km ${fmtProg(+b.PROG)} · ${fmtLadoProg(+b.DIST_EJE)}<br>E ${(+b.E).toFixed(3)} · N ${(+b.N).toFixed(3)}`).addTo(G.bm);
+  for (const p of S.puntos) {
+    p.capa = L.marker([p.lat, p.lon], { icon: iconoPunto(p.tipo, p.estado, p.codigo), title: p.codigo })
+      .bindPopup(() => popupPunto(p)).addTo(G.bm);
   }
   dibujarObs();
+}
+
+// ---- puntos de control (red geodésica y BM) ----
+const RUMBOS = ['N', 'NE', 'E', 'SE', 'S', 'SO', 'O', 'NO'];
+const rumbo = (dE, dN) => { const a = (Math.atan2(dE, dN) * 180 / Math.PI + 360) % 360; return `${RUMBOS[Math.round(a / 45) % 8]} (${Math.round(a)}°)`; };
+const NOMBRE_TIPO_PUNTO = { GEODESICO: 'Geodésico', BM: 'BM', PC: 'Punto de control', OTRO: 'Punto' };
+
+function leerPuntos(datos) {
+  const filas = datos.puntos?.length ? datos.puntos
+    : (datos.bm || []).map((b) => ({ CODIGO: b.CODIGO, TIPO: 'BM', E: b.E, N: b.N, ESTADO: 'VIGENTE' })); // proyectos sin hoja PUNTOS
+  return filas.filter((r) => r.CODIGO && r.E !== '' && r.N !== '' && !isNaN(+r.E)).map((r) => {
+    const E = +r.E, N = +r.N, u = S.eje ? S.eje.ubicar(E, N) : null;
+    const [lat, lon] = utmALatLon(E, N, S.eje?.zona || 17, S.eje ? S.eje.sur : true);
+    return {
+      codigo: String(r.CODIGO), anterior: r.CODIGO_ANTERIOR || '', tipo: String(r.TIPO || 'BM').toUpperCase(), orden: r.ORDEN || '',
+      E, N, cota: r.COTA === '' || r.COTA == null ? null : +r.COTA, estado: String(r.ESTADO || 'VIGENTE').toUpperCase(),
+      fuente: r.FUENTE || '', fecha: r.FECHA || '', obs: r.OBS || '', lat, lon, prog: u?.prog ?? null, off: u?.off ?? null,
+    };
+  }).sort((a, b) => (a.prog ?? 0) - (b.prog ?? 0));
+}
+
+// Distancia y rumbo desde tu posición (si hay GPS reciente)
+function desdeMi(E, N) {
+  if (!S.pos || Date.now() - S.pos.t > 30000 || S.pos.simulada) return null;
+  const [e0, n0] = latLonAUtm(S.pos.lat, S.pos.lon, S.eje.zona, S.eje.sur);
+  const d = Math.hypot(E - e0, N - n0);
+  return { d, txt: `${d < 1000 ? Math.round(d) + ' m' : (d / 1000).toFixed(2) + ' km'} al ${rumbo(E - e0, N - n0)}` };
+}
+
+const etqEstadoPunto = (e) => `<span class="etq ${e === 'VIGENTE' ? 'ok' : e === 'OBSERVADO' ? 'mal' : ''}">${esc(e)}</span>`;
+
+function popupPunto(p) {
+  const d = document.createElement('div'), mi = desdeMi(p.E, p.N);
+  d.innerHTML = `<h3><span class="ico-punto">${svgPunto(p.tipo, p.estado, 18)}</span> ${esc(p.codigo)}</h3>${esc(NOMBRE_TIPO_PUNTO[p.tipo] || p.tipo)}${p.orden ? ` · ${esc(p.orden)}` : ''} ${etqEstadoPunto(p.estado)}
+    ${p.obs ? `<p class="ayuda">${esc(p.obs)}</p>` : ''}${p.anterior ? `<div class="ayuda">También: ${esc(p.anterior)}</div>` : ''}
+    <div style="font-variant-numeric:tabular-nums;margin-top:4px">E ${p.E.toFixed(3)} · N ${p.N.toFixed(3)}${p.cota != null ? `<br>Cota ${p.cota.toFixed(3)} m` : ''}</div>
+    ${p.prog != null ? `<div>Km ${fmtProg(p.prog)} · ${fmtLadoProg(p.off)} del eje</div>` : ''}
+    ${mi ? `<div><b>Estás a ${mi.txt}</b></div>` : ''}
+    <div class="fila" style="margin-top:6px"><button class="btn crece" data-a="copiar">Copiar coordenadas</button>${p.prog != null ? '<button class="btn crece" data-a="ficha">Ficha Km</button>' : ''}</div>`;
+  d.querySelector('[data-a="copiar"]').onclick = async () => {
+    const t = `${p.codigo}\tE ${p.E.toFixed(4)}\tN ${p.N.toFixed(4)}${p.cota != null ? `\tZ ${p.cota.toFixed(4)}` : ''}`;
+    try { await navigator.clipboard.writeText(t); mostrarAviso('Coordenadas copiadas', 'info'); } catch { mostrarAviso(t, 'info'); }
+  };
+  d.querySelector('[data-a="ficha"]')?.addEventListener('click', () => { mapa.closePopup(); fichaProgresiva(p.prog); });
+  return d;
+}
+
+function pantallaPuntos() {
+  let filtro = '';
+  const c = hoja('Puntos de control', `
+    <input id="pc-txt" type="search" placeholder="Buscar código (nuevo o anterior)">
+    <div class="chips" id="pc-f" style="margin:10px 0"><button class="sel" data-f="">Todos</button><button data-f="GEODESICO">Geodésicos</button><button data-f="BM">BM</button><button data-f="OBSERVADO">Observados</button></div>
+    <div id="pc-lista"></div>`);
+  const pintar = () => {
+    const q = c.querySelector('#pc-txt').value.trim().toLowerCase();
+    const lst = S.puntos.filter((p) => (!filtro || p.tipo === filtro || p.estado === filtro) && (!q || (p.codigo + ' ' + p.anterior).toLowerCase().includes(q)));
+    c.querySelector('#pc-lista').innerHTML = lst.map((p) => {
+      const mi = desdeMi(p.E, p.N);
+      return `<button class="item" data-c="${esc(p.codigo)}">
+        <span class="ico-punto">${svgPunto(p.tipo, p.estado, 22)}</span>
+        <span><span class="t">${esc(p.codigo)}</span>${p.anterior ? ` <span class="s">(${esc(p.anterior)})</span>` : ''}<br>
+        <span class="s">${p.cota != null ? `Cota ${p.cota.toFixed(3)} · ` : ''}${p.prog != null ? `Km ${fmtProg(p.prog)} ${fmtLadoProg(p.off)}` : ''}</span>${mi ? `<br><span class="s"><b>${mi.txt}</b></span>` : ''}</span>
+        <span class="der">${etqEstadoPunto(p.estado)}</span></button>`;
+    }).join('') || '<p class="ayuda">No hay puntos con ese filtro.</p>';
+    c.querySelectorAll('.item').forEach((b) => b.onclick = () => {
+      const p = S.puntos.find((x) => x.codigo === b.dataset.c);
+      cerrarHoja(); setSeguir(false); G.bm.addTo(mapa);
+      mapa.setView([p.lat, p.lon], 17);
+      setTimeout(() => p.capa?.openPopup(), 300);
+    });
+  };
+  c.querySelector('#pc-txt').oninput = pintar;
+  c.querySelectorAll('#pc-f button').forEach((b) => b.onclick = () => { filtro = b.dataset.f; c.querySelectorAll('#pc-f button').forEach((x) => x.classList.toggle('sel', x === b)); pintar(); });
+  pintar();
+}
+
+// ---- ficha de progresiva: sección típica, alineamiento, elementos, puntos y observaciones ----
+// Curvatura por el círculo que pasa por tres puntos del eje (±20 m)
+function curvaEn(prog) {
+  const a = S.eje.punto(Math.max(prog - 20, S.eje.inicio)), b = S.eje.punto(prog), c = S.eje.punto(Math.min(prog + 20, S.eje.fin));
+  const cruz = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+  if (Math.abs(cruz) < 1e-6) return { recta: true };
+  const R = Math.hypot(b[0] - a[0], b[1] - a[1]) * Math.hypot(c[0] - b[0], c[1] - b[1]) * Math.hypot(a[0] - c[0], a[1] - c[1]) / (2 * Math.abs(cruz));
+  return R > 400 ? { recta: true, R } : { R, lado: cruz > 0 ? 'LI' : 'LD' }; // giro antihorario = curva a la izquierda
+}
+
+function fichaProgresiva(prog) {
+  if (!S.eje || prog == null) return;
+  prog = Math.min(Math.max(prog, S.eje.inicio), S.eje.fin);
+  const [E, N] = S.eje.punto(prog), pt = utmALatLon(E, N, S.eje.zona, S.eje.sur);
+  G.marca.clearLayers();
+  L.circleMarker(pt, { radius: 11, color: '#ffb300', weight: 4, fill: false, interactive: false }).addTo(G.marca);
+  const sec = seccionEn(S.secciones, prog), curva = curvaEn(prog);
+  const elems = S.elementos.map((e) => {
+    const a = Math.min(e.ini, e.fin ?? e.ini), b = Math.max(e.ini, e.fin ?? e.ini);
+    return { e, d: prog < a ? a - prog : prog > b ? b - prog : 0 };
+  }).filter((x) => Math.abs(x.d) <= 150).sort((x, y) => Math.abs(x.d) - Math.abs(y.d));
+  const ptos = S.puntos.map((p) => ({ p, d: Math.hypot(p.E - E, p.N - N) })).sort((x, y) => x.d - y.d).slice(0, 3);
+  const obs = S.obs.filter((o) => o.estado !== 'ANULADA' && Math.abs(o.prog - prog) <= 200).sort((x, y) => Math.abs(x.prog - prog) - Math.abs(y.prog - prog));
+  const mi = desdeMi(E, N);
+  const total = sec ? sec.capas.reduce((s, c) => s + c.cm, 0) : 0;
+
+  const c = hoja(`Km ${fmtProg(prog)}`, `
+    <div class="ficha-cab"><span class="ayuda">E ${E.toFixed(1)} · N ${N.toFixed(1)}${mi ? `<br><b>Estás a ${mi.txt}</b>` : ''}</span>
+      <span class="pasos"><button data-p="-100">◀ 100</button><button data-p="-20">◀ 20</button><button data-p="20">20 ▶</button><button data-p="100">100 ▶</button></span></div>
+
+    <h3 class="ficha-t">Alineamiento</h3>
+    ${curva.recta ? '<p>Tramo en recta (o curva muy amplia).</p>'
+      : `<div class="aviso-linea">Curva hacia la <b>${curva.lado === 'LI' ? 'izquierda' : 'derecha'}</b> · radio ≈ <b>${Math.round(curva.R)} m</b>.
+         El sobreancho va al lado interno (<b>${curva.lado}</b>).</div>`}
+
+    <h3 class="ficha-t">Sección típica y paquete estructural</h3>
+    ${sec ? `${svgSeccion(sec, { sobreancho: curva.recta ? null : curva.lado })}
+      <table class="tabla">
+        <tr><td>Calzada</td><td>${(2 * sec.carril).toFixed(2)} m (2 × ${sec.carril.toFixed(2)})</td></tr>
+        <tr><td>Bermas</td><td>2 × ${sec.berma.toFixed(2)} m</td></tr>
+        <tr><td>Plataforma</td><td>${(2 * (sec.carril + sec.berma)).toFixed(2)} m</td></tr>
+        <tr><td>Bombeo</td><td>${sec.bombeo} %</td></tr>
+        ${sec.cunetaAncho ? `<tr><td>Cuneta</td><td>${sec.cunetaAncho.toFixed(2)} × ${(sec.cunetaProf || 0).toFixed(2)} m</td></tr>` : ''}
+        ${sec.capas.map((k) => `<tr><td>${esc(k.nombre)}</td><td>${String(k.cm).replace('.', ',')} cm</td></tr>`).join('')}
+        <tr class="total"><td>Espesor total del paquete</td><td>${String(Math.round(total * 10) / 10).replace('.', ',')} cm</td></tr>
+        ${sec.taludCorte ? `<tr><td>Talud de corte</td><td style="white-space:normal">${esc(sec.taludCorte)}</td></tr>` : ''}
+        ${sec.taludRelleno ? `<tr><td>Talud de relleno</td><td style="white-space:normal">${esc(sec.taludRelleno)}</td></tr>` : ''}
+      </table>
+      ${sec.obs ? `<p class="ayuda">${esc(sec.obs)}</p>` : ''}
+      <p class="ayuda">${esc(sec.nombre)}${sec.fuente ? ` · Fuente: ${esc(sec.fuente)}` : ''}. Esquema: anchos a escala, capas exageradas en vertical.
+        Si en este punto la vía va en corte, relleno o media ladera se verá con las secciones transversales (próxima fase).</p>`
+      : '<p class="ayuda">El proyecto aún no tiene cargada la sección típica (hoja SECCION_TIPICA).</p>'}
+
+    <h3 class="ficha-t">Elementos de obra (±150 m)</h3>
+    ${elems.map(({ e, d }) => `<button class="item" data-e="${S.elementos.indexOf(e)}">${miniTipo(e.tipo, colorTipo(e.tipo))}
+      <span><span class="t">${esc(e.codigo)}</span><br><span class="s">${esc(e.desc)}</span></span>
+      <span class="der">${d === 0 ? 'aquí' : `${Math.abs(Math.round(d))} m ${d > 0 ? 'adelante' : 'atrás'}`}<br><span class="s">${e.lado || ''}</span></span></button>`).join('') || '<p class="ayuda">Ninguno en este tramo.</p>'}
+
+    <h3 class="ficha-t">Puntos de control más cercanos</h3>
+    ${ptos.map(({ p, d }) => `<button class="item" data-c="${esc(p.codigo)}"><span class="ico-punto">${svgPunto(p.tipo, p.estado, 22)}</span>
+      <span><span class="t">${esc(p.codigo)}</span>${p.anterior ? ` <span class="s">(${esc(p.anterior)})</span>` : ''}<br>
+      <span class="s">${p.cota != null ? `Cota ${p.cota.toFixed(3)} m · ` : ''}a ${Math.round(d)} m de este punto</span></span>
+      <span class="der">${etqEstadoPunto(p.estado)}</span></button>`).join('') || '<p class="ayuda">El proyecto no tiene puntos de control cargados.</p>'}
+
+    <h3 class="ficha-t">Observaciones (±200 m)</h3>
+    ${obs.map((o) => `<button class="item" data-o="${esc(o.id)}"><span><span class="t">${esc(o.categoria)} · Km ${fmtProg(o.prog)}</span><br>
+      <span class="s">${esc((o.texto || '').slice(0, 70))}</span></span><span class="der"><span class="etq ${o.estado === 'LEVANTADA' ? 'ok' : 'mal'}">${esc(o.estado)}</span></span></button>`).join('') || '<p class="ayuda">Ninguna en este tramo.</p>'}
+
+    <div class="botones"><button class="btn" id="fk-mapa">Ver en el mapa</button><button class="btn primario" id="fk-obs">＋ Observación aquí</button></div>`);
+
+  c.querySelectorAll('[data-p]').forEach((b) => b.onclick = () => {
+    const p = prog + +b.dataset.p;
+    if (!S.enVia || !S.seguir) mapa.panTo(S.eje.puntoLatLon(Math.min(Math.max(p, S.eje.inicio), S.eje.fin)));
+    fichaProgresiva(p);
+  });
+  c.querySelectorAll('[data-e]').forEach((b) => b.onclick = () => {
+    const e = S.elementos[+b.dataset.e];
+    cerrarHoja(); setSeguir(false); mapa.setView(e.capa.getLatLng(), 17); setTimeout(() => e.capa?.openPopup(), 300);
+  });
+  c.querySelectorAll('[data-c]').forEach((b) => b.onclick = () => {
+    const p = S.puntos.find((x) => x.codigo === b.dataset.c);
+    cerrarHoja(); setSeguir(false); G.bm.addTo(mapa); mapa.setView([p.lat, p.lon], 17); setTimeout(() => p.capa?.openPopup(), 300);
+  });
+  c.querySelectorAll('[data-o]').forEach((b) => b.onclick = () => abrirObs(b.dataset.o));
+  c.querySelector('#fk-mapa').onclick = () => { cerrarHoja(); setSeguir(false); mapa.setView(pt, Math.max(mapa.getZoom(), 17)); };
+  c.querySelector('#fk-obs').onclick = () => abrirObs(null, { prog, off: 0, fuente: 'Ficha de progresiva' });
 }
 
 const offLado = (lado) => (lado === 'LI' ? -5 : lado === 'LD' ? 5 : 0);
@@ -121,8 +291,9 @@ function popupElemento(e) {
   d.innerHTML = `<h3>${esc(e.codigo)}</h3>${esc(e.desc)}<br>
     <b>Km ${fmtProg(e.ini)}${e.fin != null ? ' – ' + fmtProg(e.fin) : ''}</b>${lado}<br>
     Estado: <span class="etq">${esc(e.estado || '—')}</span>${e.obs ? `<p class="ayuda">${esc(e.obs)}</p>` : ''}
-    <button class="btn primario">＋ Observación aquí</button>`;
-  d.querySelector('button').onclick = () => { mapa.closePopup(); abrirObs(null, { elemento: e.codigo, prog: e.ini, off: offLado(e.lado), fuente: 'Elemento' }); };
+    <div class="fila" style="margin-top:8px"><button class="btn primario crece" data-a="obs">＋ Observación</button><button class="btn crece" data-a="ficha">Ficha Km</button></div>`;
+  d.querySelector('[data-a="obs"]').onclick = () => { mapa.closePopup(); abrirObs(null, { elemento: e.codigo, prog: e.ini, off: offLado(e.lado), fuente: 'Elemento' }); };
+  d.querySelector('[data-a="ficha"]').onclick = () => { mapa.closePopup(); fichaProgresiva(e.ini); };
   return d;
 }
 
@@ -446,6 +617,8 @@ function aplicarDatos(datos) {
     lado: String(e.LADO || '').toUpperCase(), desc: String(e.DESCRIPCION || nombreTipo(e.TIPO)),
     estado: e.ESTADO, obs: e.OBS,
   })).sort((a, b) => a.ini - b.ini);
+  S.secciones = leerSecciones(datos.seccionTipica);
+  S.puntos = leerPuntos(datos);
   dibujarProyecto();
   if (S.eje && S.encuadrar && !S.enVia) mapa.fitBounds(L.latLngBounds(S.ejeLL), { padding: [20, 20] });
   S.encuadrar = false;
@@ -475,7 +648,7 @@ async function abrirProyecto(id) {
 
 // Deja el mapa sin datos (al cambiar de proyecto o al perder el acceso)
 function vaciarPantalla() {
-  Object.assign(S, { datos: null, eje: null, ejeLL: null, elementos: [], obs: [], logo: null, logoLocal: null, pendientes: 0 });
+  Object.assign(S, { datos: null, eje: null, ejeLL: null, elementos: [], puntos: [], secciones: [], obs: [], logo: null, logoLocal: null, pendientes: 0 });
   dibujarProyecto();
   $('#btn-menu').dataset.n = '';
 }
@@ -710,6 +883,8 @@ function menu() {
     ${admin ? `<button data-a="usuarios"><span class="ic">👥</span>Usuarios y permisos${S.pendientes ? `<span class="nota" style="color:var(--mal);font-weight:700">${S.pendientes} por autorizar</span>` : ''}</button>
     <button data-a="datos"><span class="ic">🛠️</span>Datos del proyecto<span class="nota">eje, elementos, logo</span></button>` : ''}
     <button data-a="buscar"><span class="ic">🔎</span>Ir a una progresiva</button>
+    <button data-a="ficha"><span class="ic">📋</span>Ficha de esta progresiva<span class="nota">sección y paquete</span></button>
+    <button data-a="puntos"><span class="ic">📍</span>Puntos de control<span class="nota">${S.puntos.length}</span></button>
     <button data-a="elementos"><span class="ic">🧱</span>Elementos de obra<span class="nota">${S.elementos.length}</span></button>
     <button data-a="obs"><span class="ic">📝</span>Observaciones<span class="nota">${S.obs.filter((o) => o.estado !== 'ANULADA').length}${pend ? ` · ${pend} por enviar` : ''}</span></button>
     <button data-a="gps"><span class="ic">${S.pausado ? '▶️' : '⏸️'}</span>${S.pausado ? 'Reanudar GPS' : 'Pausar GPS (ahorrar batería)'}</button>
@@ -726,8 +901,19 @@ function menu() {
     gps: () => { cerrarHoja(); pausarGPS(!S.pausado); },
     actualizar: () => { cerrarHoja(); actualizarDatos(true, true); }, ajustes: pantallaAjustes, sello: pantallaSello, demo: pantallaDemo, ayuda: pantallaAyuda,
     usuarios: pantallaUsuarios, datos: () => { location.href = 'admin.html'; }, salir: cerrarSesion,
+    ficha: fichaAqui, puntos: pantallaPuntos,
   })[b.dataset.a]());
 }
+
+// Ficha en tu posición (en la vía) o en el centro del mapa (mira +)
+function fichaAqui() {
+  if (!S.eje) return;
+  if (S.enVia && S.u) return fichaProgresiva(S.u.prog);
+  const c = mapa.getCenter(), u = ubicarLatLon(c.lat, c.lng);
+  if (u.dist > 500) return mostrarAviso('Acerca el centro del mapa (mira +) a la vía o busca una progresiva');
+  fichaProgresiva(u.prog);
+}
+$('#prog').addEventListener('click', fichaAqui);
 
 // ---- usuarios y permisos (solo administrador) ----
 const fechaCorta = (v) => (v ? new Date(v).toLocaleString('es-PE', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—');
@@ -807,10 +993,9 @@ function pantallaBuscar() {
     const p = parseProg(inp.value);
     if (p == null || !S.eje) return mostrarAviso('Escribe una progresiva válida, por ejemplo 12+500');
     if (p < S.eje.inicio || p > S.eje.fin) return mostrarAviso(`La vía va de ${fmtProg(S.eje.inicio)} a ${fmtProg(S.eje.fin)}`);
-    cerrarHoja(); setSeguir(false);
-    const pt = S.eje.puntoLatLon(p);
-    mapa.setView(pt, 17);
-    L.popup().setLatLng(pt).setContent(`<h3>Km ${fmtProg(p)}</h3>`).openOn(mapa);
+    setSeguir(false);
+    mapa.setView(S.eje.puntoLatLon(p), 17);
+    fichaProgresiva(p);
   };
   c.querySelector('#b-ir').onclick = ir;
   inp.onkeydown = (e) => { if (e.key === 'Enter') ir(); };
@@ -1355,7 +1540,8 @@ function pantallaAyuda() {
       <li><b>📷 Foto</b> o <b>＋ Observación</b>: la cámara de la app imprime en la foto la progresiva, el lado, las coordenadas, la fecha y tu nombre. También puedes adjuntar fotos de TimeStampCam desde «Galería».</li>
       <li>Sin señal también funciona: las observaciones se guardan en el teléfono y se envían solas cuando vuelve internet.</li>
       <li>Lejos de la vía (o con el GPS en pausa), la mira <b>+</b> del centro del mapa te dice la progresiva del punto que mires.</li>
-      <li>En el mapa: cuadros de color = elementos de obra (cada tipo con su dibujo), flecha azul = tú, gota = observación, triángulo negro = BM.</li>
+      <li>En el mapa: cuadros de color = elementos de obra (cada tipo con su dibujo), flecha azul = tú, gota = observación, triángulo negro = BM, triángulo azul = punto geodésico (rojo si está observado).</li>
+      <li>Toca la vía o la progresiva de arriba para abrir la <b>ficha de esa progresiva</b>: curva, sección típica con su paquete estructural, elementos, puntos de control y observaciones cercanas.</li>
       <li>Para ahorrar batería: ☰ → <b>Pausar GPS</b>.</li>
     </ol>
     <p class="ayuda">En iPhone, los avisos funcionan con la app abierta y la pantalla encendida.</p>`);
@@ -1447,4 +1633,4 @@ async function arrancar() {
   pintarEstado();
 }
 arrancar();
-window.__recorrido = { S, alPosicion, iniciarSim, detenerSim, pausarGPS, sincronizar, abrirProyecto };
+window.__recorrido = { S, alPosicion, iniciarSim, detenerSim, pausarGPS, sincronizar, abrirProyecto, fichaProgresiva };
