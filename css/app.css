@@ -299,7 +299,7 @@ textarea { min-height: 96px; resize: vertical; }
 .fotos a { display: flex; align-items: center; justify-content: center; height: 100%; font-weight: 700; color: var(--azul); }
 
 #aviso {
-  position: fixed; left: 12px; right: 12px; top: calc(150px + env(safe-area-inset-top)); z-index: 1050;
+  position: fixed; left: 12px; right: 12px; top: calc(150px + env(safe-area-inset-top)); z-index: 1160; /* sobre la pantalla de acceso */
   background: var(--acento); color: #000; padding: 14px 16px; border-radius: 12px;
   font-weight: 700; font-size: 18px; box-shadow: 0 4px 16px rgba(0,0,0,.35);
 }

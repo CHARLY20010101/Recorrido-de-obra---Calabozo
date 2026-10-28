@@ -6,7 +6,7 @@ import { leerExif, reducir } from './fotos.js';
 import { iconoElemento, iconoBM, iconoUsuario, miniTipo } from './iconos.js';
 import { abrirCamara, componer, ESTILO_BASE } from './camara.js';
 
-const VERSION_APP = '2.0.0';
+const VERSION_APP = '2.0.1';
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const RAD = Math.PI / 180;
@@ -581,22 +581,29 @@ async function iniciarSesion() {
   } catch (e) { mostrarAcceso('error', 'No se pudo conectar con el servidor del proyecto: ' + e.message); }
 }
 
+// Completa el inicio de sesión al volver de Google. Si algo falla, el motivo se muestra en la
+// pantalla de acceso (y se devuelve 'detener' para no reabrir el proyecto por encima).
 async function terminarLogin(regreso) {
   const pend = await kv.get('login');
   await kv.del('login');
-  if (!pend || pend.proyecto !== regreso.estado || Date.now() - pend.t > 15 * 60000) {
-    mostrarAviso('El inicio de sesión no se pudo completar. Vuelve a intentarlo.'); return;
-  }
+  const fallo = async (msg) => {
+    S.actual = pend?.proyecto || (await kv.get('actual')) || S.proyectos[0]?.id || null;
+    mostrarAcceso('error', msg);
+    return 'detener';
+  };
+  if (!pend) return fallo('El inicio de sesión volvió sin los datos de la solicitud (pudo abrirse en otra ventana). Toca «Reintentar» desde la app.');
+  if (pend.proyecto !== regreso.estado) return fallo('El inicio de sesión no corresponde a este proyecto. Toca «Reintentar».');
+  if (Date.now() - pend.t > 15 * 60000) return fallo('El inicio de sesión tardó demasiado. Toca «Reintentar».');
   const p = S.proyectos.find((x) => x.id === pend.proyecto);
-  if (!p) return;
+  if (!p) return fallo('No se encontró el proyecto en este teléfono.');
   await kv.set('actual', p.id);
-  if (regreso.error) { mostrarAviso('Se canceló el inicio de sesión'); return; }
+  if (regreso.error) return fallo(`Google no completó el inicio de sesión (${regreso.error}). Toca «Reintentar».`);
   try {
     const r = await api(p).llamar('login', { id_token: regreso.idToken, nonce: pend.nonce, dispositivo: dispositivo() });
     if (r.sesion) await kv.set('sesion:' + p.id, { token: r.sesion, correo: r.correo, nombre: r.nombre, rol: r.rol, estado: r.estado });
     else { S.actual = p.id; mostrarAcceso('denegado', `${r.correo}: acceso ${String(r.estado).toLowerCase()} por el administrador.`); return 'detener'; }
     if (r.estado === 'AUTORIZADO' && !S.ajustes.nombre) { S.ajustes.nombre = r.nombre; await kv.set('ajustes', S.ajustes); }
-  } catch (e) { mostrarAviso('No se pudo iniciar sesión: ' + e.message); }
+  } catch (e) { return fallo('El servidor del proyecto no aceptó el inicio de sesión: ' + e.message); }
 }
 
 const dispositivo = () => {
