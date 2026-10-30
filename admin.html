@@ -79,7 +79,16 @@
   </div>
 
   <div class="tarjeta">
-    <h2>5. Respaldo</h2>
+    <h2>5. Láminas de planos</h2>
+    <p class="ayuda">Planos del expediente en SVG (se preparan desde el PDF con <b>01_scripts\laminas_svg.py</b>). Se ven en la ficha de cada progresiva, con zoom, igual que en el plano. Se guardan en una carpeta privada de Drive y solo las ve el equipo autorizado. Puedes elegir varias a la vez; si la clave ya existe, se reemplaza.</p>
+    <p class="ayuda">En la hoja <b>LAMINAS</b> puedes limitar una lámina a un tramo con PROG_INI y PROG_FIN en metros (vacíos = toda la obra).</p>
+    <div id="lam-lista"></div>
+    <label class="btn" style="display:flex;align-items:center;justify-content:center;margin-top:8px">Elegir láminas (.svg)<input id="f-lam" type="file" accept=".svg,image/svg+xml" multiple hidden></label>
+    <div id="r-lam" class="res"></div>
+  </div>
+
+  <div class="tarjeta">
+    <h2>6. Respaldo</h2>
     <p class="ayuda">Descarga el proyecto como archivo .json. La app puede abrirlo sin conexión a la hoja (por ejemplo, para otra persona o como respaldo).</p>
     <button class="btn" id="respaldo">Descargar archivo del proyecto</button>
     <div id="r-resp" class="res"></div>
@@ -115,6 +124,7 @@ const get = (a) => srv.llamar(a);
     const d = await get('proyecto');
     res('#r-con', `Conectado a «${d.config.NOMBRE}» como ${yo.correo}: eje de ${d.eje.length} vértices, ${d.elementos.length} elementos, ${d.bm.length} BM.`, true);
     verLogo(d.logo);
+    verLaminas(d.laminas || []);
     document.querySelectorAll('.tarjeta').forEach((t) => { t.style.display = ''; });
   } catch (e) { res('#r-con', 'No se pudo conectar: ' + e.message + (e.codigo === 'SESION' ? ' (vuelve a iniciar sesión en la app)' : '')); }
 })();
@@ -207,6 +217,44 @@ $('#logo-quitar').onclick = async () => {
   if (!confirm('¿Quitar el logo de las fotos del proyecto? (la imagen se conserva en Drive)')) return;
   try { await post({ a: 'logo_quitar' }); verLogo(''); res('#r-logo', 'Logo quitado.', true); }
   catch (er) { res('#r-logo', 'Error: ' + er.message); }
+};
+
+// ---- láminas de planos: clave, título y zonas vienen dentro del SVG (data-clave, data-titulo, data-enfoques) ----
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+function verLaminas(lista) {
+  const tramo = (l) => (l.progIni == null && l.progFin == null ? 'Toda la obra' : `${l.progIni == null ? '' : fmtProg(l.progIni)} a ${l.progFin == null ? 'final' : fmtProg(l.progFin)}`);
+  $('#lam-lista').innerHTML = lista.length ? `<table><tr><th>Clave</th><th>Lámina</th><th>Tramo</th><th></th></tr>${lista.map((l) => `<tr>
+      <td>${esc(l.clave)}</td><td>${esc(l.titulo)}<br><span class="ayuda">${esc(l.tipo)}</span></td><td>${tramo(l)}</td>
+      <td><button class="btn peligro" data-q="${esc(l.clave)}">Quitar</button></td></tr>`).join('')}</table>`
+    : '<p class="ayuda">Aún no hay láminas cargadas.</p>';
+  $('#lam-lista').querySelectorAll('[data-q]').forEach((b) => b.onclick = async () => {
+    if (!confirm(`¿Quitar la lámina ${b.dataset.q} de la app? (el archivo se conserva en Drive)`)) return;
+    try { await post({ a: 'lamina_quitar', clave: b.dataset.q }); res('#r-lam', `Lámina ${b.dataset.q} quitada.`, true); verLaminas((await get('proyecto')).laminas || []); }
+    catch (er) { res('#r-lam', 'Error: ' + er.message); }
+  });
+}
+$('#f-lam').onchange = async (e) => {
+  const archivos = [...e.target.files];
+  e.target.value = '';
+  if (!archivos.length) return;
+  const laminas = [];
+  for (const f of archivos) {
+    const svg = await f.text();
+    const raiz = new DOMParser().parseFromString(svg, 'image/svg+xml').documentElement;
+    if (raiz.nodeName !== 'svg') return res('#r-lam', `«${f.name}» no es un SVG.`);
+    const d = (k) => raiz.getAttribute('data-' + k) || '';
+    const nombre = f.name.replace(/\.svg$/i, '');
+    laminas.push({ clave: d('clave') || nombre.replace(/[^\w.-]+/g, '-').slice(0, 40), titulo: d('titulo') || nombre, tipo: d('tipo') || 'OTRO',
+      enfoques: d('enfoques') || '{}', fuente: d('fuente'), svg });
+  }
+  if (!confirm(`¿Cargar ${laminas.length} lámina(s)?\n\n${laminas.map((l) => `${l.clave} · ${l.titulo} (${Math.round(l.svg.length / 1024)} KB)`).join('\n')}`)) return;
+  for (const [i, l] of laminas.entries()) {
+    res('#r-lam', `Subiendo ${l.clave} (${i + 1} de ${laminas.length})…`, true);
+    try { await post({ a: 'lamina_subir', ...l }); }
+    catch (er) { return res('#r-lam', `Error en ${l.clave}: ${er.message}`); }
+  }
+  res('#r-lam', `${laminas.length} lámina(s) cargada(s). El equipo las verá en la ficha al actualizar la app.`, true);
+  verLaminas((await get('proyecto')).laminas || []);
 };
 
 $('#respaldo').onclick = async () => {

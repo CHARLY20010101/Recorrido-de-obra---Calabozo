@@ -6,8 +6,9 @@ import { leerExif, reducir } from './fotos.js';
 import { iconoElemento, iconoPunto, iconoUsuario, miniTipo, svgPunto } from './iconos.js';
 import { leerSecciones, seccionEn, svgSeccion } from './seccion.js';
 import { abrirCamara, componer, ESTILO_BASE } from './camara.js';
+import { abrirVisor, medidas, miniatura, nombreCorto } from './laminas.js';
 
-const VERSION_APP = '2.1.0';
+const VERSION_APP = '2.2.0';
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const RAD = Math.PI / 180;
@@ -30,6 +31,7 @@ const TIPOS_BASE = {
 
 const S = {
   proyectos: [], actual: null, datos: null, eje: null, tipos: {}, elementos: [], puntos: [], secciones: [],
+  laminas: [], lamCache: {}, lamURL: {}, lamSel: null,
   ajustes: { ...AJUSTES_BASE }, obs: [],
   pos: null, u: null, watch: null, pausado: false, gpsError: '', enVia: false, seguir: true, sim: null, wake: null,
   hist: [], dir: 1, ultTramo: null, avisados: new Set(), fueraCont: 0, avisoFuera: false,
@@ -228,8 +230,8 @@ function fichaProgresiva(prog) {
          El sobreancho va al lado interno (<b>${curva.lado}</b>).</div>`}
 
     <h3 class="ficha-t">Sección típica y paquete estructural</h3>
-    ${sec ? `${svgSeccion(sec, { sobreancho: curva.recta ? null : curva.lado })}
-      <table class="tabla">
+    <div id="fk-lam"></div>
+    ${sec ? `<table class="tabla">
         <tr><td>Calzada</td><td>${(2 * sec.carril).toFixed(2)} m (2 × ${sec.carril.toFixed(2)})</td></tr>
         <tr><td>Bermas</td><td>2 × ${sec.berma.toFixed(2)} m</td></tr>
         <tr><td>Plataforma</td><td>${(2 * (sec.carril + sec.berma)).toFixed(2)} m</td></tr>
@@ -241,8 +243,7 @@ function fichaProgresiva(prog) {
         ${sec.taludRelleno ? `<tr><td>Talud de relleno</td><td style="white-space:normal">${esc(sec.taludRelleno)}</td></tr>` : ''}
       </table>
       ${sec.obs ? `<p class="ayuda">${esc(sec.obs)}</p>` : ''}
-      <p class="ayuda">${esc(sec.nombre)}${sec.fuente ? ` · Fuente: ${esc(sec.fuente)}` : ''}. Esquema: anchos a escala, capas exageradas en vertical.
-        Si en este punto la vía va en corte, relleno o media ladera se verá con las secciones transversales (próxima fase).</p>`
+      <p class="ayuda">${esc(sec.nombre)}${sec.fuente ? ` · Fuente: ${esc(sec.fuente)}` : ''}.</p>`
       : '<p class="ayuda">El proyecto aún no tiene cargada la sección típica (hoja SECCION_TIPICA).</p>'}
 
     <h3 class="ficha-t">Elementos de obra (±150 m)</h3>
@@ -278,9 +279,98 @@ function fichaProgresiva(prog) {
   c.querySelectorAll('[data-o]').forEach((b) => b.onclick = () => abrirObs(b.dataset.o));
   c.querySelector('#fk-mapa').onclick = () => { cerrarHoja(); setSeguir(false); mapa.setView(pt, Math.max(mapa.getZoom(), 17)); };
   c.querySelector('#fk-obs').onclick = () => abrirObs(null, { prog, off: 0, fuente: 'Ficha de progresiva' });
+  S.fichaProg = { prog, curva, sec };
+  pintarLaminaFicha();
 }
 
-const offLado = (lado) => (lado === 'LI' ? -5 : lado === 'LD' ? 5 : 0);
+// ---- láminas de planos (SVG del expediente) ----
+// El servidor manda solo la lista; cada lámina se descarga aparte, una vez, y queda en el teléfono.
+function leerLaminas(datos) {
+  return (datos.laminas || []).filter((l) => l.clave).map((l) => {
+    let enfoques = {};
+    try { enfoques = typeof l.enfoques === 'string' ? JSON.parse(l.enfoques || '{}') : l.enfoques || {}; } catch { /* sin enfoques */ }
+    const num = (v) => (v === '' || v == null || isNaN(+v) ? null : +v);
+    return { clave: String(l.clave), titulo: String(l.titulo || l.clave), tipo: l.tipo || 'OTRO', ini: num(l.progIni), fin: num(l.progFin),
+      enfoques, fuente: l.fuente || '', actualizado: l.actualizado || '', svg: l.svg };
+  });
+}
+const laminasEn = (prog, tipo) => S.laminas.filter((l) => (!tipo || l.tipo === tipo) && (l.ini == null || prog >= l.ini) && (l.fin == null || prog <= l.fin));
+
+let lamCola = Promise.resolve();
+const colaLaminas = () => { lamCola = lamCola.then(prepararLaminas).catch(() => {}); };
+async function prepararLaminas() {
+  const p = proyActual();
+  if (!p) return;
+  const id = p.id, lista = S.laminas;
+  const guardadas = (await kv.get('laminas:' + id)) || {};
+  let cambio = false;
+  // proyecto de archivo: las láminas vienen dentro del archivo
+  for (const l of lista) if (l.svg && guardadas[l.clave]?.actualizado !== l.actualizado) { guardadas[l.clave] = { actualizado: l.actualizado, svg: l.svg, ...medidas(l.svg) }; cambio = true; }
+  for (const k of Object.keys(guardadas)) if (!lista.some((l) => l.clave === k)) { delete guardadas[k]; cambio = true; }
+  if (cambio) await kv.set('laminas:' + id, guardadas);
+  if (S.actual !== id) return;
+  S.lamCache = guardadas;
+  pintarLaminaFicha();
+  if (!p.url || !navigator.onLine || !autorizado()) return;
+  for (const l of lista) {
+    if (guardadas[l.clave]?.svg && guardadas[l.clave].actualizado === l.actualizado) continue;
+    try {
+      const r = await A().llamar('lamina', { clave: l.clave });
+      if (S.actual !== id) return;
+      guardadas[l.clave] = { actualizado: l.actualizado, svg: r.svg, ...medidas(r.svg) };
+      await kv.set('laminas:' + id, guardadas);
+      S.lamCache = guardadas;
+      pintarLaminaFicha();
+    } catch (e) { if (!(await manejarAcceso(e))) pintarLaminaFicha('No se pudo descargar la lámina: ' + e.message); return; }
+  }
+}
+
+function urlLamina(clave) {
+  const g = S.lamCache[clave], k = clave + '|' + g.actualizado;
+  if (!S.lamURL[k]) {
+    for (const x of Object.keys(S.lamURL)) if (x.startsWith(clave + '|')) { URL.revokeObjectURL(S.lamURL[x]); delete S.lamURL[x]; }
+    S.lamURL[k] = URL.createObjectURL(new Blob([g.svg], { type: 'image/svg+xml' }));
+  }
+  return S.lamURL[k];
+}
+
+// Bloque de la ficha: pestañas por tipo de sección, la lámina recortada en la sección y accesos a sus detalles.
+// Sin láminas cargadas queda el esquema dibujado con los datos de SECCION_TIPICA.
+function pintarLaminaFicha(error = '') {
+  const c = $('#fk-lam');
+  if (!c || !S.fichaProg) return;
+  const { prog, curva, sec } = S.fichaProg;
+  const tipicas = laminasEn(prog, 'SECCION_TIPICA'), otras = laminasEn(prog).filter((l) => l.tipo !== 'SECCION_TIPICA');
+  if (!tipicas.length) {
+    c.innerHTML = sec ? `${svgSeccion(sec, { sobreancho: curva.recta ? null : curva.lado })}
+      <p class="ayuda">Esquema: anchos a escala, capas exageradas en vertical.</p>` : '';
+    return;
+  }
+  const l = tipicas.find((x) => x.clave === S.lamSel) || tipicas[0];
+  const g = S.lamCache[l.clave];
+  const enf = l.enfoques['Sección'] || Object.values(l.enfoques)[0];
+  c.innerHTML = `${tipicas.length > 1 ? `<div class="chips lam-tabs">${tipicas.map((x) => `<button data-l="${esc(x.clave)}" class="${x === l ? 'sel' : ''}">${esc(nombreCorto(x.titulo))}</button>`).join('')}</div>` : ''}
+    ${g ? `<button class="lam-ver" data-k="Sección">${miniatura(urlLamina(l.clave), g.W, g.H, enf)}
+        <span class="lam-pie"><span>${esc(l.clave)} · ${esc(l.titulo)}</span><b>⤢ Ampliar</b></span></button>
+      <div class="chips lam-chips">${Object.keys(l.enfoques).filter((k) => k !== 'Sección').map((k) => `<button data-k="${esc(k)}">${esc(k)}</button>`).join('')}
+        <button data-k="">Lámina completa</button></div>`
+      : `<div class="lam-espera">${error ? esc(error) : navigator.onLine ? 'Descargando la lámina del plano…' : 'La lámina se descargará cuando haya internet.'}</div>`}
+    ${!curva.recta ? `<p class="ayuda">En las láminas el sobreancho (SA) está dibujado a la izquierda; en esta curva va al lado <b>${curva.lado === 'LI' ? 'izquierdo (LI)' : 'derecho (LD)'}</b>.</p>` : ''}
+    ${otras.length ? `<div class="chips lam-chips">${otras.map((x) => `<button data-o-lam="${esc(x.clave)}">📐 ${esc(x.titulo)}</button>`).join('')}</div>` : ''}
+    <p class="ayuda">Láminas del expediente técnico. Qué sección corresponde aquí (corte, relleno o media ladera) se verá con las secciones transversales.</p>`;
+  c.querySelectorAll('[data-l]').forEach((b) => b.onclick = () => { S.lamSel = b.dataset.l; pintarLaminaFicha(); });
+  c.querySelectorAll('[data-k]').forEach((b) => b.onclick = () => abrirLamina(l, b.dataset.k));
+  c.querySelectorAll('[data-o-lam]').forEach((b) => b.onclick = () => abrirLamina(S.laminas.find((x) => x.clave === b.dataset.oLam), ''));
+}
+
+function abrirLamina(l, enfoque) {
+  const g = l && S.lamCache[l.clave];
+  if (!g) return mostrarAviso(navigator.onLine ? 'La lámina aún se está descargando' : 'La lámina se descargará cuando haya internet');
+  try { abrirVisor({ titulo: `${l.clave} · ${l.titulo}`, svg: g.svg, enfoques: l.enfoques, inicial: enfoque }); }
+  catch (e) { mostrarAviso('No se pudo abrir la lámina: ' + e.message); }
+}
+
+const offLado =(lado) => (lado === 'LI' ? -5 : lado === 'LD' ? 5 : 0);
 const descSinLado = (d) => String(d).replace(/\s*\b(LI|LD)\b/g, '').trim();
 // LI/LD de los planos (sentido de la progresiva) convertido al sentido en que avanzas
 const ladoRel = (lado) => (!lado ? '' : (lado === 'LI') === (S.dir > 0) ? 'izquierda' : 'derecha');
@@ -619,6 +709,8 @@ function aplicarDatos(datos) {
   })).sort((a, b) => a.ini - b.ini);
   S.secciones = leerSecciones(datos.seccionTipica);
   S.puntos = leerPuntos(datos);
+  S.laminas = leerLaminas(datos);
+  colaLaminas();
   dibujarProyecto();
   if (S.eje && S.encuadrar && !S.enVia) mapa.fitBounds(L.latLngBounds(S.ejeLL), { padding: [20, 20] });
   S.encuadrar = false;
@@ -648,7 +740,9 @@ async function abrirProyecto(id) {
 
 // Deja el mapa sin datos (al cambiar de proyecto o al perder el acceso)
 function vaciarPantalla() {
-  Object.assign(S, { datos: null, eje: null, ejeLL: null, elementos: [], puntos: [], secciones: [], obs: [], logo: null, logoLocal: null, pendientes: 0 });
+  Object.values(S.lamURL).forEach((u) => URL.revokeObjectURL(u));
+  Object.assign(S, { datos: null, eje: null, ejeLL: null, elementos: [], puntos: [], secciones: [], obs: [], logo: null, logoLocal: null, pendientes: 0,
+    laminas: [], lamCache: {}, lamURL: {} });
   dibujarProyecto();
   $('#btn-menu').dataset.n = '';
 }
@@ -699,9 +793,9 @@ async function manejarAcceso(e) {
   return false;
 }
 
-// Borra del teléfono los datos de un proyecto: datos, observaciones, sesión y logo propio
+// Borra del teléfono los datos de un proyecto: datos, láminas, observaciones, sesión y logo propio
 async function borrarProyectoLocal(id, quitarDeLista = false) {
-  for (const k of ['datos:', 'sesion:', 'logo:']) await kv.del(k + id);
+  for (const k of ['datos:', 'laminas:', 'sesion:', 'logo:']) await kv.del(k + id);
   for (const o of await obsDB.todas(id)) await obsDB.borrar(o.id);
   if (S.actual === id) { S.sesion = null; detenerGPS(); detenerSim(false); salirDeVia(); vaciarPantalla(); }
   if (quitarDeLista) { S.proyectos = S.proyectos.filter((x) => x.id !== id); await kv.set('proyectos', S.proyectos); }
@@ -1541,7 +1635,7 @@ function pantallaAyuda() {
       <li>Sin señal también funciona: las observaciones se guardan en el teléfono y se envían solas cuando vuelve internet.</li>
       <li>Lejos de la vía (o con el GPS en pausa), la mira <b>+</b> del centro del mapa te dice la progresiva del punto que mires.</li>
       <li>En el mapa: cuadros de color = elementos de obra (cada tipo con su dibujo), flecha azul = tú, gota = observación, triángulo negro = BM, triángulo azul = punto geodésico (rojo si está observado).</li>
-      <li>Toca la vía o la progresiva de arriba para abrir la <b>ficha de esa progresiva</b>: curva, sección típica con su paquete estructural, elementos, puntos de control y observaciones cercanas.</li>
+      <li>Toca la vía o la progresiva de arriba para abrir la <b>ficha de esa progresiva</b>: curva, láminas de la sección típica del plano (tócalas para ampliar), paquete estructural, elementos, puntos de control y observaciones cercanas.</li>
       <li>Para ahorrar batería: ☰ → <b>Pausar GPS</b>.</li>
     </ol>
     <p class="ayuda">En iPhone, los avisos funcionan con la app abierta y la pantalla encendida.</p>`);

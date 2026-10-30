@@ -190,6 +190,37 @@ body.recorrido #mira { display: none; }
 .aviso-linea { background: #fff8e1; border-left: 4px solid var(--acento); padding: 8px 10px; border-radius: 6px; font-size: 14px; }
 .aviso-linea.mal { background: #fdecea; border-left-color: var(--mal); }
 
+/* láminas de planos en la ficha: la hoja entera dentro de un marco que solo deja ver la zona */
+.lam-tabs { margin: 4px 0 8px; }
+.lam-ver { display: block; width: 100%; padding: 0; border: 1px solid #9aa5ae; border-radius: 8px; background: #fff; overflow: hidden; cursor: zoom-in; text-align: left; }
+.lam-mini { position: relative; display: block; width: 100%; overflow: hidden; background: #fff; }
+.lam-mini img { position: absolute; max-width: none; height: auto; display: block; user-select: none; -webkit-user-drag: none; }
+.lam-pie { display: flex; justify-content: space-between; gap: 8px; padding: 6px 10px; border-top: 1px solid var(--borde); background: #f4f6f8; font-size: 12px; color: #4a5560; }
+.lam-pie b { color: var(--azul); white-space: nowrap; }
+.lam-chips { margin-top: 8px; gap: 6px; }
+.chips.lam-chips button { font-size: 13px; padding: 6px 11px; }
+.lam-espera { padding: 22px 12px; text-align: center; border: 1px dashed var(--borde); border-radius: 8px; color: #5f6b75; font-size: 14px; }
+
+/* visor de láminas: fondo blanco de plano, zoom con dos dedos */
+#plano { position: fixed; inset: 0; z-index: 3500; background: #fff; display: flex; flex-direction: column; }
+.plano-cab { display: flex; align-items: center; gap: 8px; padding: calc(8px + env(safe-area-inset-top)) 10px 8px 14px; background: var(--azul); color: #fff; }
+.plano-cab .t { flex: 1; font-weight: 700; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plano-cab button { border: 0; border-radius: 10px; min-height: 40px; padding: 0 12px; font: 600 15px system-ui, sans-serif; background: rgba(255,255,255,.15); color: #fff; }
+.plano-cab .plano-x { width: 44px; font-size: 20px; }
+#plano.girada .plano-girar { background: var(--acento); color: #111; }
+.plano-lienzo { flex: 1; min-height: 0; position: relative; touch-action: none; overflow: hidden; background: #fff; cursor: grab; }
+.plano-lienzo svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.plano-nota { padding: 6px 12px; font-size: 13px; background: #fff8e1; color: #5d4500; }
+.plano-pie {
+  display: flex; gap: 6px; overflow-x: auto; padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--borde); background: #f4f6f8; -webkit-overflow-scrolling: touch;
+}
+.plano-pie button { flex: none; border: 1px solid var(--borde); background: #fff; border-radius: 999px; padding: 8px 12px; font: 600 13px system-ui, sans-serif; color: var(--texto); }
+.plano-pie button.sel { background: var(--azul); color: #fff; border-color: var(--azul); }
+.plano-zoom { display: none; gap: 6px; }
+.plano-cab .plano-zoom button { width: 40px; padding: 0; font-size: 20px; }
+@media (pointer: fine) { .plano-zoom { display: flex; } } /* en la PC; en el celular se usa con los dedos */
+
 /* aviso de nueva versión */
 #actualizar {
   position: fixed; left: 12px; right: 12px; bottom: calc(84px + env(safe-area-inset-bottom)); z-index: 1250;
