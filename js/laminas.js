@@ -41,7 +41,7 @@ export function limpiarSVG(texto) {
 
 // Visor a pantalla completa: dos dedos = zoom, un dedo = mover, doble toque = acercar,
 // rueda del ratón en la PC. "Girar" pone la lámina en horizontal para verla con el teléfono echado.
-export function abrirVisor({ titulo, svg: texto, enfoques = {}, inicial = 'Sección', nota = '' }) {
+export function abrirVisor({ titulo, svg: texto, enfoques = {}, inicial = 'Sección', nota = '', textoTodo = 'Lámina completa' }) {
   const svg = limpiarSVG(texto);
   const [, , W, H] = (svg.getAttribute('viewBox') || '0 0 1000 700').split(/[\s,]+/).map(Number);
   svg.removeAttribute('width'); svg.removeAttribute('height');
@@ -60,7 +60,7 @@ export function abrirVisor({ titulo, svg: texto, enfoques = {}, inicial = 'Secci
       <button class="plano-girar" title="Girar la lámina">⟳ Girar</button><button class="plano-x" aria-label="Cerrar">✕</button></div>
     <div class="plano-lienzo"></div>
     ${nota ? `<div class="plano-nota">${esc(nota)}</div>` : ''}
-    <div class="plano-pie">${nombres.map((k) => `<button data-k="${esc(k)}">${esc(k)}</button>`).join('')}<button data-k="">Lámina completa</button></div>`;
+    <div class="plano-pie">${nombres.map((k) => `<button data-k="${esc(k)}">${esc(k)}</button>`).join('')}<button data-k="">${esc(textoTodo)}</button></div>`;
   document.body.appendChild(v);
   const lienzo = v.querySelector('.plano-lienzo');
   const el = document.importNode(svg, true);

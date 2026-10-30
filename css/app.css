@@ -201,6 +201,19 @@ body.recorrido #mira { display: none; }
 .chips.lam-chips button { font-size: 13px; padding: 6px 11px; }
 .lam-espera { padding: 22px 12px; text-align: center; border: 1px dashed var(--borde); border-radius: 8px; color: #5f6b75; font-size: 14px; }
 
+/* sección transversal de la ficha */
+.trans-img { display: block; background: #fff; }
+.trans-img img { display: block; width: 100%; height: auto; max-height: 340px; object-fit: contain; }
+.trans-ley { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 6px 0 2px; font-size: 12px; color: #4a5560; }
+.trans-ley i { display: inline-block; width: 16px; height: 10px; margin-right: 4px; vertical-align: -1px; border-radius: 2px; }
+.trans-ley i.h-corte { background: repeating-linear-gradient(45deg, #ef6c00 0 1.5px, #fff 1.5px 4px); border: 1px solid #ef6c00; }
+.trans-ley i.h-relleno { background: radial-gradient(#558b2f 30%, transparent 32%) 0 0 / 4px 4px, #f1f8e9; border: 1px solid #7cb342; }
+.trans-ley i.raya { height: 0; border-top: 2px dashed; border-radius: 0; vertical-align: 3px; }
+.punto-color { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
+.tabla.vol th { text-align: right; font-size: 13px; color: var(--suave); padding: 4px; }
+.tabla.vol th:first-child, .tabla.vol td:first-child { text-align: left; }
+.tabla.vol td { text-align: right; font-variant-numeric: tabular-nums; }
+
 /* visor de láminas: fondo blanco de plano, zoom con dos dedos */
 #plano { position: fixed; inset: 0; z-index: 3500; background: #fff; display: flex; flex-direction: column; }
 .plano-cab { display: flex; align-items: center; gap: 8px; padding: calc(8px + env(safe-area-inset-top)) 10px 8px 14px; background: var(--azul); color: #fff; }

@@ -88,7 +88,15 @@
   </div>
 
   <div class="tarjeta">
-    <h2>6. Respaldo</h2>
+    <h2>6. Secciones transversales</h2>
+    <p class="ayuda">Paquetes de secciones por tramo (archivos .json preparados con <b>01_scripts\secciones_extraer.py</b>). Cada paquete trae su fuente: expediente, línea base o replanteo del contratista, o control de la supervisión. En la ficha se ve la sección de cada progresiva y, si hay dos fuentes en el mismo tramo, se comparan sus terrenos. Se guardan en la carpeta privada de Drive. Puedes elegir varios a la vez; si la clave ya existe, se reemplaza.</p>
+    <div id="sec-lista"></div>
+    <label class="btn" style="display:flex;align-items:center;justify-content:center;margin-top:8px">Elegir paquetes de secciones (.json)<input id="f-sec-tr" type="file" accept=".json,application/json" multiple hidden></label>
+    <div id="r-sec-tr" class="res"></div>
+  </div>
+
+  <div class="tarjeta">
+    <h2>7. Respaldo</h2>
     <p class="ayuda">Descarga el proyecto como archivo .json. La app puede abrirlo sin conexión a la hoja (por ejemplo, para otra persona o como respaldo).</p>
     <button class="btn" id="respaldo">Descargar archivo del proyecto</button>
     <div id="r-resp" class="res"></div>
@@ -125,6 +133,7 @@ const get = (a) => srv.llamar(a);
     res('#r-con', `Conectado a «${d.config.NOMBRE}» como ${yo.correo}: eje de ${d.eje.length} vértices, ${d.elementos.length} elementos, ${d.bm.length} BM.`, true);
     verLogo(d.logo);
     verLaminas(d.laminas || []);
+    verSecciones(d.secciones || []);
     document.querySelectorAll('.tarjeta').forEach((t) => { t.style.display = ''; });
   } catch (e) { res('#r-con', 'No se pudo conectar: ' + e.message + (e.codigo === 'SESION' ? ' (vuelve a iniciar sesión en la app)' : '')); }
 })();
@@ -255,6 +264,43 @@ $('#f-lam').onchange = async (e) => {
   }
   res('#r-lam', `${laminas.length} lámina(s) cargada(s). El equipo las verá en la ficha al actualizar la app.`, true);
   verLaminas((await get('proyecto')).laminas || []);
+};
+
+// ---- secciones transversales: paquetes por tramo con su fuente ----
+const FUENTE = { EXPEDIENTE: 'Expediente', LINEA_BASE: 'Línea base', REPLANTEO: 'Replanteo', CONTROL: 'Control', OTRO: 'Otra' };
+function verSecciones(lista) {
+  lista = [...lista].sort((a, b) => (a.fuente + a.progIni).localeCompare(b.fuente + b.progIni, 'es', { numeric: true }));
+  $('#sec-lista').innerHTML = lista.length ? `<table><tr><th>Clave</th><th>Fuente</th><th>Tramo</th><th>Secc.</th><th></th></tr>${lista.map((s) => `<tr>
+      <td>${esc(s.clave)}</td><td>${esc(FUENTE[s.fuente] || s.fuente)}<br><span class="ayuda">${esc(s.documento)}</span></td>
+      <td>${fmtProg(s.progIni)} a ${fmtProg(s.progFin)}</td><td>${s.n}</td>
+      <td><button class="btn peligro" data-q="${esc(s.clave)}">Quitar</button></td></tr>`).join('')}</table>`
+    : '<p class="ayuda">Aún no hay secciones cargadas.</p>';
+  $('#sec-lista').querySelectorAll('[data-q]').forEach((b) => b.onclick = async () => {
+    if (!confirm(`¿Quitar el paquete ${b.dataset.q} de la app? (el archivo se conserva en Drive)`)) return;
+    try { await post({ a: 'secciones_quitar', clave: b.dataset.q }); res('#r-sec-tr', `Paquete ${b.dataset.q} quitado.`, true); verSecciones((await get('proyecto')).secciones || []); }
+    catch (er) { res('#r-sec-tr', 'Error: ' + er.message); }
+  });
+}
+$('#f-sec-tr').onchange = async (e) => {
+  const archivos = [...e.target.files];
+  e.target.value = '';
+  if (!archivos.length) return;
+  const paquetes = [];
+  for (const f of archivos) {
+    const datos = await f.text();
+    let p;
+    try { p = JSON.parse(datos); } catch { return res('#r-sec-tr', `«${f.name}» no es un archivo JSON.`); }
+    if (p.formato !== 'recorrido-secciones/1' || !Array.isArray(p.secciones)) return res('#r-sec-tr', `«${f.name}» no es un paquete de secciones.`);
+    paquetes.push({ clave: p.clave || f.name.replace(/\.json$/i, ''), fuente: p.fuente, n: p.secciones.length, ini: p.progIni, fin: p.progFin, datos });
+  }
+  if (!confirm(`¿Cargar ${paquetes.length} paquete(s) de secciones?\n\n${paquetes.map((p) => `${p.clave} · ${FUENTE[p.fuente] || p.fuente} · ${fmtProg(p.ini)} a ${fmtProg(p.fin)} · ${p.n} secciones`).join('\n')}`)) return;
+  for (const [i, p] of paquetes.entries()) {
+    res('#r-sec-tr', `Subiendo ${p.clave} (${i + 1} de ${paquetes.length})…`, true);
+    try { await post({ a: 'secciones_subir', clave: p.clave, datos: p.datos }); }
+    catch (er) { return res('#r-sec-tr', `Error en ${p.clave}: ${er.message}`); }
+  }
+  res('#r-sec-tr', `${paquetes.length} paquete(s) cargado(s). El equipo los verá en la ficha al actualizar la app.`, true);
+  verSecciones((await get('proyecto')).secciones || []);
 };
 
 $('#respaldo').onclick = async () => {

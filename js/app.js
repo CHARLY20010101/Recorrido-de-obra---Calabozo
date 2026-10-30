@@ -7,8 +7,9 @@ import { iconoElemento, iconoPunto, iconoUsuario, miniTipo, svgPunto } from './i
 import { leerSecciones, seccionEn, svgSeccion } from './seccion.js';
 import { abrirCamara, componer, ESTILO_BASE } from './camara.js';
 import { abrirVisor, medidas, miniatura, nombreCorto } from './laminas.js';
+import { svgTransversal, tipoSeccion, cotaEn, nombreFuente, colorFuente } from './transversal.js';
 
-const VERSION_APP = '2.3.0';
+const VERSION_APP = '2.4.0';
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const RAD = Math.PI / 180;
@@ -32,6 +33,7 @@ const TIPOS_BASE = {
 const S = {
   proyectos: [], actual: null, datos: null, eje: null, tipos: {}, elementos: [], puntos: [], secciones: [],
   laminas: [], lamCache: {}, lamURL: {}, lamSel: null, lamFirma: '', elemPend: [],
+  secJuegos: [], secCache: {}, secFirma: '', transURL: null,
   ajustes: { ...AJUSTES_BASE }, obs: [],
   pos: null, u: null, watch: null, pausado: false, gpsError: '', enVia: false, seguir: true, sim: null, wake: null,
   hist: [], dir: 1, ultTramo: null, avisados: new Set(), fueraCont: 0, avisoFuera: false,
@@ -243,6 +245,9 @@ function fichaProgresiva(prog) {
       : `<div class="aviso-linea">Curva hacia la <b>${curva.lado === 'LI' ? 'izquierda' : 'derecha'}</b> · radio ≈ <b>${Math.round(curva.R)} m</b>.
          El sobreancho va al lado interno (<b>${curva.lado}</b>).</div>`}
 
+    <h3 class="ficha-t">Sección transversal</h3>
+    <div id="fk-trans"></div>
+
     <h3 class="ficha-t">Sección típica y paquete estructural</h3>
     <div id="fk-lam"></div>
     ${sec ? `<table class="tabla">
@@ -295,8 +300,157 @@ function fichaProgresiva(prog) {
   c.querySelector('#fk-mapa').onclick = () => { cerrarHoja(); setSeguir(false); mapa.setView(pt, Math.max(mapa.getZoom(), 17)); };
   c.querySelector('#fk-obs').onclick = () => abrirObs(null, { prog, off: 0, fuente: 'Ficha de progresiva' });
   c.querySelector('#fk-elem')?.addEventListener('click', () => editarElemento(null, { prog }));
-  S.fichaProg = { prog, curva, sec };
+  S.fichaProg = { prog, curva, sec, tipo: null };
+  pintarTransversal();
   pintarLaminaFicha();
+}
+
+// ---- secciones transversales por tramo (expediente, línea base, replanteo…) ----
+// Igual que las láminas: el servidor manda la lista y cada paquete se descarga una vez y queda en el teléfono.
+function leerJuegosSecc(datos) {
+  return (datos.secciones || []).filter((j) => j.clave).map((j) => ({
+    clave: String(j.clave), fuente: j.fuente || 'OTRO', descripcion: j.descripcion || '', documento: j.documento || '',
+    ini: +j.progIni || 0, fin: +j.progFin || 0, n: +j.n || 0, actualizado: j.actualizado || '', paquete: j.paquete,
+  }));
+}
+
+let secCola = Promise.resolve();
+const colaSecciones = () => { secCola = secCola.then(prepararSecciones).catch(() => {}); };
+async function prepararSecciones() {
+  const p = proyActual();
+  if (!p) return;
+  const id = p.id, lista = S.secJuegos;
+  const guardadas = (await kv.get('secc:' + id)) || {};
+  let cambio = false;
+  // proyecto de archivo: los paquetes vienen dentro del archivo
+  for (const j of lista) if (j.paquete && guardadas[j.clave]?.actualizado !== j.actualizado) { guardadas[j.clave] = { actualizado: j.actualizado, secciones: j.paquete.secciones }; cambio = true; }
+  for (const k of Object.keys(guardadas)) if (!lista.some((j) => j.clave === k)) { delete guardadas[k]; cambio = true; }
+  if (cambio) await kv.set('secc:' + id, guardadas);
+  if (S.actual !== id) return;
+  S.secCache = guardadas;
+  refrescarFichaSecciones();
+  if (!p.url || !navigator.onLine || !autorizado()) return;
+  for (const j of lista) {
+    if (guardadas[j.clave] && guardadas[j.clave].actualizado === j.actualizado) continue;
+    try {
+      const r = await A().llamar('secciones', { clave: j.clave });
+      if (S.actual !== id) return;
+      guardadas[j.clave] = { actualizado: j.actualizado, secciones: JSON.parse(r.datos).secciones };
+      await kv.set('secc:' + id, guardadas);
+      S.secCache = guardadas;
+      refrescarFichaSecciones();
+    } catch (e) { if (!(await manejarAcceso(e))) refrescarFichaSecciones('No se pudieron descargar las secciones: ' + e.message); return; }
+  }
+}
+
+// Sección más cercana de cada fuente (a menos de 15 m); la del expediente va primero
+function seccionesEn(prog) {
+  const mejor = {};
+  for (const j of S.secJuegos) {
+    const g = S.secCache[j.clave];
+    if (!g || prog < j.ini - 20 || prog > j.fin + 20) continue;
+    const a = g.secciones;
+    let lo = 0, hi = a.length - 1;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (a[m].p < prog) lo = m + 1; else hi = m; }
+    for (const s of [a[lo - 1], a[lo]]) {
+      if (!s || Math.abs(s.p - prog) > 15) continue;
+      if (!mejor[j.fuente] || Math.abs(s.p - prog) < Math.abs(mejor[j.fuente].s.p - prog)) mejor[j.fuente] = { fuente: j.fuente, juego: j, s };
+    }
+  }
+  return Object.values(mejor).sort((x, y) => (x.fuente === 'EXPEDIENTE' ? -1 : y.fuente === 'EXPEDIENTE' ? 1 : 0));
+}
+
+// Lámina de sección típica que corresponde al tipo de sección (corte, relleno o media ladera)
+function laminaParaTipo(tipo) {
+  const re = tipo === 'corte' ? /corte/i : tipo === 'relleno' ? /relleno/i : /ladera/i;
+  return S.laminas.find((l) => l.tipo === 'SECCION_TIPICA' && re.test(l.titulo))?.clave || null;
+}
+
+// Al llegar las secciones con la ficha abierta: se dibujan y se elige la lámina típica que corresponde
+function refrescarFichaSecciones(error = '') {
+  if (!$('#fk-trans') || !S.fichaProg) return;
+  const antes = S.fichaProg.tipo;
+  pintarTransversal(error);
+  if (S.fichaProg.tipo !== antes) pintarLaminaFicha();
+}
+
+const fmtCota = (z) => (z == null ? '—' : z.toFixed(2));
+function pintarTransversal(error = '') {
+  const c = $('#fk-trans');
+  if (!c || !S.fichaProg) return;
+  const { prog } = S.fichaProg;
+  const cerca = seccionesEn(prog);
+  if (!cerca.length) {
+    const cubre = S.secJuegos.some((j) => prog >= j.ini - 20 && prog <= j.fin + 20);
+    c.innerHTML = `<p class="ayuda">${error ? esc(error) : !S.secJuegos.length ? 'El proyecto aún no tiene secciones transversales cargadas.'
+      : cubre ? (navigator.onLine ? 'Descargando las secciones de este tramo…' : 'Las secciones de este tramo se descargarán cuando haya internet.')
+        : 'No hay secciones cargadas para este tramo.'}</p>`;
+    return;
+  }
+  const pri = cerca[0], otras = cerca.slice(1), s = pri.s;
+  const tipo = tipoSeccion(s);
+  // la lámina típica sigue a la sección, salvo que el usuario haya elegido otra pestaña en esta ficha
+  if (S.fichaProg.tipo !== tipo) { S.fichaProg.tipo = tipo; S.lamSel = laminaParaTipo(tipo) || S.lamSel; }
+  // en la ficha, la zona de la obra; en el visor, todo el ancho levantado
+  const svg = svgTransversal(pri, otras), mini = svgTransversal(pri, otras, { recorte: true });
+  if (S.transURL) URL.revokeObjectURL(S.transURL);
+  S.transURL = URL.createObjectURL(new Blob([mini], { type: 'image/svg+xml' }));
+  const ct = s.ct ?? cotaEn(s.tn, 0), cr = s.cr ?? cotaEn(s.sr, 0), h = ct != null && cr != null ? ct - cr : null;
+  const filaOtra = (o) => {
+    const z = cotaEn(o.s.tn, 0), d = z != null && ct != null ? z - ct : null;
+    return `<tr><td><span class="punto-color" style="background:${colorFuente(o.fuente)}"></span>Terreno ${esc(nombreFuente(o.fuente))} en el eje</td>
+      <td>${fmtCota(z)}${d != null ? ` <span class="s">(${d >= 0 ? '+' : ''}${d.toFixed(2)} m)</span>` : ''}</td></tr>
+      ${o.s.ac != null ? `<tr><td>AC / AR ${esc(nombreFuente(o.fuente))}</td><td>${o.s.ac.toFixed(2)} / ${(o.s.ar || 0).toFixed(2)} m²</td></tr>` : ''}`;
+  };
+  c.innerHTML = `
+    <button class="lam-ver trans-ver"><span class="trans-img"><img src="${S.transURL}" alt="Sección transversal Km ${fmtProg(s.p)}"></span>
+      <span class="lam-pie"><span>Km ${fmtProg(s.p)} · ${esc(nombreFuente(pri.fuente))}${Math.abs(s.p - prog) > 0.5 ? ` (la más cercana a ${fmtProg(prog)})` : ''}</span><b>⤢ Ampliar</b></span></button>
+    <div class="trans-ley"><span><i style="background:${colorFuente(pri.fuente)}"></i>Terreno</span><span><i style="background:#0d47a1"></i>Proyecto</span>
+      <span><i class="h-corte"></i>Corte</span><span><i class="h-relleno"></i>Relleno</span>${otras.map((o) => `<span><i class="raya" style="border-color:${colorFuente(o.fuente)}"></i>${esc(nombreFuente(o.fuente))}</span>`).join('')}</div>
+    <table class="tabla">
+      <tr><td>Tipo de sección</td><td>${tipo === 'a nivel' ? 'A nivel' : tipo.charAt(0).toUpperCase() + tipo.slice(1)}</td></tr>
+      <tr><td>Área de corte (AC)</td><td>${(s.ac || 0).toFixed(2)} m²</td></tr>
+      <tr><td>Área de relleno (AR)</td><td>${(s.ar || 0).toFixed(2)} m²</td></tr>
+      <tr><td>Cota del terreno en el eje (CT)</td><td>${fmtCota(ct)}</td></tr>
+      <tr><td>Cota de subrasante en el eje (CR)</td><td>${fmtCota(cr)}</td></tr>
+      ${h != null ? `<tr><td>En el eje, hasta la subrasante</td><td>${h >= 0 ? 'corte' : 'relleno'} ${Math.abs(h).toFixed(2)} m</td></tr>` : ''}
+      ${otras.map(filaOtra).join('')}
+    </table>
+    <p class="ayuda">${esc(pri.juego.descripcion)}${pri.juego.documento ? ` · ${esc(pri.juego.documento)}` : ''}. Secciones cada 20 m: usa ◀ 20 y 20 ▶ para recorrerlas.</p>`;
+  c.querySelector('.trans-ver').onclick = () => {
+    try { abrirVisor({ titulo: `Sección Km ${fmtProg(s.p)} · ${nombreFuente(pri.fuente)}`, svg, enfoques: {}, inicial: '', textoTodo: 'Sección completa' }); }
+    catch (e) { mostrarAviso('No se pudo abrir la sección: ' + e.message); }
+  };
+}
+
+// Volúmenes de corte y relleno por tramo de 5 km según las secciones cargadas (áreas medias), por fuente
+function pantallaVolumenes() {
+  const porFuente = {};
+  for (const j of S.secJuegos) {
+    const g = S.secCache[j.clave];
+    if (g) (porFuente[j.fuente] ||= []).push(...g.secciones);
+  }
+  const faltan = S.secJuegos.filter((j) => !S.secCache[j.clave]).length;
+  const tablas = Object.entries(porFuente).map(([fuente, secs]) => {
+    secs.sort((a, b) => a.p - b.p);
+    const tramos = {}; let tc = 0, tr = 0;
+    for (let i = 0; i + 1 < secs.length; i++) {
+      const a = secs[i], b = secs[i + 1], d = b.p - a.p;
+      if (d <= 0 || d > 200) continue; // salto entre paquetes o sin secciones: no se inventa volumen
+      const k = Math.floor(a.p / 5000), t = (tramos[k] ||= [0, 0]);
+      const c = ((a.ac || 0) + (b.ac || 0)) / 2 * d, r = ((a.ar || 0) + (b.ar || 0)) / 2 * d;
+      t[0] += c; t[1] += r; tc += c; tr += r;
+    }
+    const n = (v) => Math.round(v).toLocaleString('es-PE');
+    return `<h3 class="ficha-t"><span class="punto-color" style="background:${colorFuente(fuente)}"></span>${esc(nombreFuente(fuente))} · ${secs.length} secciones</h3>
+      <table class="tabla vol"><tr><th>Tramo</th><th>Corte m³</th><th>Relleno m³</th></tr>
+      ${Object.entries(tramos).sort((x, y) => x[0] - y[0]).map(([k, [c, r]]) => `<tr><td>${k * 5}+000 – ${k * 5 + 5}+000</td><td>${n(c)}</td><td>${n(r)}</td></tr>`).join('')}
+      <tr class="total"><td>Total</td><td>${n(tc)}</td><td>${n(tr)}</td></tr></table>`;
+  }).join('');
+  hoja('Volúmenes por tramo', `${tablas || '<p class="ayuda">Aún no hay secciones descargadas.</p>'}
+    ${faltan ? `<p class="aviso-linea">Faltan descargar ${faltan} paquete(s) de secciones: los totales están incompletos.</p>` : ''}
+    <p class="ayuda">Volúmenes por áreas medias entre secciones consecutivas, con las áreas de corte (AC) y relleno (AR) de cada fuente.
+      Sirven para comparar fuentes y tramos; no reemplazan el metrado de pago, que se sustenta con protocolos y levantamientos aprobados.</p>`);
 }
 
 // ---- láminas de planos (SVG del expediente) ----
@@ -373,7 +527,9 @@ function pintarLaminaFicha(error = '') {
       : `<div class="lam-espera">${error ? esc(error) : navigator.onLine ? 'Descargando la lámina del plano…' : 'La lámina se descargará cuando haya internet.'}</div>`}
     ${!curva.recta ? `<p class="ayuda">En las láminas el sobreancho (SA) está dibujado a la izquierda; en esta curva va al lado <b>${curva.lado === 'LI' ? 'izquierdo (LI)' : 'derecho (LD)'}</b>.</p>` : ''}
     ${otras.length ? `<div class="chips lam-chips">${otras.map((x) => `<button data-o-lam="${esc(x.clave)}">📐 ${esc(x.titulo)}</button>`).join('')}</div>` : ''}
-    <p class="ayuda">Láminas del expediente técnico. Qué sección corresponde aquí (corte, relleno o media ladera) se verá con las secciones transversales.</p>`;
+    <p class="ayuda">Láminas del expediente técnico. ${S.fichaProg.tipo
+      ? `Según la sección transversal, aquí la vía va ${S.fichaProg.tipo === 'a nivel' ? 'casi a nivel del terreno' : `en <b>${S.fichaProg.tipo}</b>`}${laminaParaTipo(S.fichaProg.tipo) ? `: se muestra la lámina ${esc(laminaParaTipo(S.fichaProg.tipo))}` : ''}.`
+      : 'Qué sección corresponde aquí (corte, relleno o media ladera) se ve en la sección transversal de arriba, cuando esté cargada.'}</p>`;
   c.querySelectorAll('[data-l]').forEach((b) => b.onclick = () => { S.lamSel = b.dataset.l; pintarLaminaFicha(); });
   c.querySelectorAll('[data-k]').forEach((b) => b.onclick = () => abrirLamina(l, b.dataset.k));
   c.querySelectorAll('[data-o-lam]').forEach((b) => b.onclick = () => abrirLamina(S.laminas.find((x) => x.clave === b.dataset.oLam), ''));
@@ -937,6 +1093,9 @@ function aplicarDatos(datos) {
   S.laminas = leerLaminas(datos);
   const firma = S.laminas.map((l) => l.clave + '|' + l.actualizado).join(';');
   if (firma !== S.lamFirma) { S.lamFirma = firma; colaLaminas(); }
+  S.secJuegos = leerJuegosSecc(datos);
+  const firmaS = S.secJuegos.map((j) => j.clave + '|' + j.actualizado).join(';');
+  if (firmaS !== S.secFirma) { S.secFirma = firmaS; colaSecciones(); }
   dibujarProyecto();
   if (S.eje && S.encuadrar && !S.enVia) mapa.fitBounds(L.latLngBounds(S.ejeLL), { padding: [20, 20] });
   S.encuadrar = false;
@@ -969,7 +1128,7 @@ async function abrirProyecto(id) {
 function vaciarPantalla() {
   Object.values(S.lamURL).forEach((u) => URL.revokeObjectURL(u));
   Object.assign(S, { datos: null, eje: null, ejeLL: null, elementos: [], puntos: [], secciones: [], obs: [], logo: null, logoLocal: null, pendientes: 0,
-    laminas: [], lamCache: {}, lamURL: {}, lamFirma: '', elemPend: [] });
+    laminas: [], lamCache: {}, lamURL: {}, lamFirma: '', elemPend: [], secJuegos: [], secCache: {}, secFirma: '' });
   dibujarProyecto();
   $('#btn-menu').dataset.n = '';
 }
@@ -996,6 +1155,7 @@ async function actualizarDatos(forzar = false, avisar = false) {
     } else if (avisar) mostrarAviso('Los datos ya están al día', 'info');
     // láminas que no se pudieron descargar antes
     if (S.laminas.some((l) => !S.lamCache[l.clave]?.svg)) colaLaminas();
+    if (S.secJuegos.some((j) => !S.secCache[j.clave])) colaSecciones();
     await sincronizar();
   } catch (e) {
     if (await manejarAcceso(e)) return;
@@ -1024,7 +1184,7 @@ async function manejarAcceso(e) {
 
 // Borra del teléfono los datos de un proyecto: datos, láminas, observaciones, sesión y logo propio
 async function borrarProyectoLocal(id, quitarDeLista = false) {
-  for (const k of ['datos:', 'laminas:', 'elem_pend:', 'sesion:', 'logo:']) await kv.del(k + id);
+  for (const k of ['datos:', 'laminas:', 'secc:', 'elem_pend:', 'sesion:', 'logo:']) await kv.del(k + id);
   for (const o of await obsDB.todas(id)) await obsDB.borrar(o.id);
   if (S.actual === id) { S.sesion = null; detenerGPS(); detenerSim(false); salirDeVia(); vaciarPantalla(); }
   if (quitarDeLista) { S.proyectos = S.proyectos.filter((x) => x.id !== id); await kv.set('proyectos', S.proyectos); }
@@ -1227,6 +1387,7 @@ function menu() {
     <button data-a="buscar"><span class="ic">🔎</span>Ir a una progresiva</button>
     <button data-a="ficha"><span class="ic">📋</span>Ficha de esta progresiva<span class="nota">sección y paquete</span></button>
     <button data-a="puntos"><span class="ic">📍</span>Puntos de control<span class="nota">${S.puntos.length}</span></button>
+    ${puede('tecnico') && S.secJuegos.length ? '<button data-a="vol"><span class="ic">📐</span>Volúmenes por tramo<span class="nota">según secciones</span></button>' : ''}
     <button data-a="elementos"><span class="ic">🧱</span>Elementos de obra<span class="nota">${S.elementos.length}</span></button>
     <button data-a="obs"><span class="ic">📝</span>Observaciones<span class="nota">${S.obs.filter((o) => o.estado !== 'ANULADA').length}${pend ? ` · ${pend} por enviar` : ''}</span></button>
     <button data-a="gps"><span class="ic">${S.pausado ? '▶️' : '⏸️'}</span>${S.pausado ? 'Reanudar GPS' : 'Pausar GPS (ahorrar batería)'}</button>
@@ -1243,7 +1404,7 @@ function menu() {
     gps: () => { cerrarHoja(); pausarGPS(!S.pausado); },
     actualizar: () => { cerrarHoja(); actualizarDatos(true, true); }, ajustes: pantallaAjustes, sello: pantallaSello, demo: pantallaDemo, ayuda: pantallaAyuda,
     usuarios: pantallaUsuarios, datos: () => { location.href = 'admin.html'; }, salir: cerrarSesion,
-    ficha: fichaAqui, puntos: pantallaPuntos,
+    ficha: fichaAqui, puntos: pantallaPuntos, vol: pantallaVolumenes,
   })[b.dataset.a]());
 }
 
