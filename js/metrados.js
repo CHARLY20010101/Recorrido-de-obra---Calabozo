@@ -15,6 +15,7 @@ export function leerPartidas(lista) {
     item: String(p.item), desc: String(p.desc || ''), und: String(p.und || ''), contrato: num(p.contrato),
     titulo: String(p.nivel || '').toUpperCase() === 'TITULO', herramienta: p.herramienta || '', criterio: p.criterio || '',
     calculo: String(p.calculo || '').toUpperCase(), obs: p.obs || '',
+    pu: num(p.pu), // solo llega a Acceso total y al administrador
   }));
 }
 

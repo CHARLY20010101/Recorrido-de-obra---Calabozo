@@ -99,7 +99,32 @@
   </div>
 
   <div class="tarjeta">
-    <h2>7. Respaldo</h2>
+    <h2>7. Datos del contrato (valorizaciones)</h2>
+    <p class="ayuda">Con estos datos y los precios unitarios de la hoja PARTIDAS la app calcula las valorizaciones. Solo los ven Acceso total y el administrador. Los porcentajes van en % (13.30, no 0.133).</p>
+    <div class="fila" style="align-items:flex-end">
+      <div class="crece"><label class="campo" for="c-monto">Monto del contrato con IGV (S/)</label><input id="c-monto" type="text" inputmode="decimal"></div>
+      <div class="crece"><label class="campo" for="c-igv">IGV (%)</label><input id="c-igv" type="text" inputmode="decimal"></div>
+    </div>
+    <div class="fila" style="align-items:flex-end">
+      <div class="crece"><label class="campo" for="c-gg">Gastos generales (% del costo directo)</label><input id="c-gg" type="text" inputmode="decimal"></div>
+      <div class="crece"><label class="campo" for="c-ut">Utilidad (% del costo directo)</label><input id="c-ut" type="text" inputmode="decimal"></div>
+    </div>
+    <div class="fila" style="align-items:flex-end">
+      <div class="crece"><label class="campo" for="c-ad">Adelanto directo entregado, con IGV (S/)</label><input id="c-ad" type="text" inputmode="decimal"></div>
+      <div class="crece"><label class="campo" for="c-am">Adelantos para materiales entregados, con IGV (S/)</label><input id="c-am" type="text" inputmode="decimal"></div>
+    </div>
+    <div class="fila" style="align-items:flex-end">
+      <div class="crece"><label class="campo" for="c-ret">Retención de garantía de fiel cumplimiento (% de cada pago)</label><input id="c-ret" type="text" inputmode="decimal"></div>
+      <div class="crece"><label class="campo" for="c-ini">Inicio del plazo</label><input id="c-ini" type="date"></div>
+      <div class="crece"><label class="campo" for="c-plazo">Plazo (días calendario)</label><input id="c-plazo" type="text" inputmode="numeric"></div>
+    </div>
+    <p class="ayuda">Si la Entidad entrega otro adelanto, actualiza el monto entregado (el acumulado): la amortización de las siguientes valorizaciones se ajusta sola.</p>
+    <button class="btn primario" id="c-guardar" style="margin-top:10px">Guardar datos del contrato</button>
+    <div id="r-con-c" class="res"></div>
+  </div>
+
+  <div class="tarjeta">
+    <h2>8. Respaldo</h2>
     <p class="ayuda">Descarga el proyecto como archivo .json. La app puede abrirlo sin conexión a la hoja (por ejemplo, para otra persona o como respaldo).</p>
     <button class="btn" id="respaldo">Descargar archivo del proyecto</button>
     <div id="r-resp" class="res"></div>
@@ -137,6 +162,7 @@ const get = (a) => srv.llamar(a);
     verLogo(d.logo);
     verLaminas(d.laminas || []);
     verSecciones(d.secciones || []);
+    verContrato(d.contrato || {});
     document.querySelectorAll('.tarjeta').forEach((t) => { t.style.display = ''; });
   } catch (e) { res('#r-con', 'No se pudo conectar: ' + e.message + (e.codigo === 'SESION' ? ' (vuelve a iniciar sesión en la app)' : '')); }
 })();
@@ -204,6 +230,22 @@ $('#f-bm').onchange = subirCSV('BM');
 $('#f-pts').onchange = subirCSV('PUNTOS');
 $('#f-sec').onchange = subirCSV('SECCION_TIPICA');
 $('#f-part').onchange = subirCSV('PARTIDAS');
+
+// ---- datos del contrato para las valorizaciones ----
+const CAMPOS_CONTRATO = { montoContrato: '#c-monto', igv: '#c-igv', gg: '#c-gg', utilidad: '#c-ut', adelantoDirecto: '#c-ad', adelantoMateriales: '#c-am', retencion: '#c-ret', inicio: '#c-ini', plazo: '#c-plazo' };
+function verContrato(c) {
+  for (const [k, sel] of Object.entries(CAMPOS_CONTRATO)) $(sel).value = c[k] ?? '';
+}
+$('#c-guardar').onclick = async () => {
+  const contrato = {};
+  for (const [k, sel] of Object.entries(CAMPOS_CONTRATO)) contrato[k] = k === 'inicio' ? $(sel).value : $(sel).value.trim().replace(/\s/g, '').replace(/,(?=\d{3}(\D|$))/g, '');
+  res('#r-con-c', 'Guardando…', true);
+  try {
+    const r = await post({ a: 'contrato_guardar', contrato });
+    verContrato(r.contrato);
+    res('#r-con-c', 'Datos del contrato guardados. El equipo los verá al actualizar la app.', true);
+  } catch (e) { res('#r-con-c', 'Error: ' + e.message); }
+};
 
 // ---- logo: se reduce a 600 px como máximo (PNG conserva la transparencia) ----
 function verLogo(src) {

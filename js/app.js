@@ -10,8 +10,9 @@ import { abrirVisor, medidas, miniatura, nombreCorto } from './laminas.js';
 import { svgTransversal, tipoSeccion, cotaEn, nombreFuente, colorFuente } from './transversal.js';
 import { leerPartidas, leerMetrados, avance, cuenta, porVerificar, LADOS_MET, grupoDe, calcular, filasResumen, filasDetalle } from './metrados.js';
 import { libroXlsx } from './xlsx.js';
+import { preparar, cerradas, contratoCompleto, cdContrato, filasExcel, r2 } from './valorizacion.js';
 
-const VERSION_APP = '3.0.0';
+const VERSION_APP = '4.0.0';
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const RAD = Math.PI / 180;
@@ -36,7 +37,7 @@ const S = {
   proyectos: [], actual: null, datos: null, eje: null, tipos: {}, elementos: [], puntos: [], secciones: [],
   laminas: [], lamCache: {}, lamURL: {}, lamSel: null, lamFirma: '', elemPend: [],
   secJuegos: [], secCache: {}, secFirma: '', transURL: null,
-  partidas: [], metServ: [], metPend: [], metrados: [], metVer: '',
+  partidas: [], metServ: [], metPend: [], metrados: [], metVer: '', contrato: null, valServ: [],
   ajustes: { ...AJUSTES_BASE }, obs: [],
   pos: null, u: null, watch: null, pausado: false, gpsError: '', enVia: false, seguir: true, sim: null, wake: null,
   hist: [], dir: 1, ultTramo: null, avisados: new Set(), fueraCont: 0, avisoFuera: false,
@@ -481,7 +482,7 @@ const hoyLocal = () => new Date(Date.now() - new Date().getTimezoneOffset() * 6e
 const CLASE_MET = { VERIFICADO: 'ok', VALORIZADO: 'ok', OBSERVADO: 'mal', ANULADO: 'gris', REGISTRADO: 'info' };
 const etqMet = (m) => `<span class="etq ${CLASE_MET[m.estado] || ''}">${m.estado === 'REGISTRADO' ? 'POR VERIFICAR' : esc(m.estado)}</span>${m.pendiente ? ' <span class="etq pend">por enviar</span>' : ''}`;
 const ACCION_MET = { REGISTRADO: 'Registrado', EDITADO: 'Corregido', CORREGIDO: 'Corregido tras la observación', VERIFICADO: 'Verificado', OBSERVADO: 'Observado',
-  REABIERTO: 'Reabierto', ANULADO: 'Anulado', RESTAURADO: 'Restaurado', EDICION_HOJA: 'Editado en la hoja' };
+  REABIERTO: 'Reabierto', ANULADO: 'Anulado', RESTAURADO: 'Restaurado', EDICION_HOJA: 'Editado en la hoja', VALORIZADO: 'Valorizado', DESVALORIZADO: 'Valorización anulada' };
 const ladoMet = (l) => (l === 'AMBOS' ? 'ambos lados' : l);
 const ubicMet = (m) => (m.ini != null ? `Km ${fmtUbic(m.ini, m.fin)}${m.lado ? ' · ' + ladoMet(m.lado) : ''}` : 'Sin tramo (partida global)');
 const puedeEditarMet = (m) => !['ANULADO', 'VALORIZADO'].includes(m.estado) && (verificador() || (m.mio && m.estado !== 'VERIFICADO'));
@@ -499,8 +500,8 @@ async function cargarMetrados(forzar = false, version = null) {
   if (!forzar && version != null && S.metVer && version === S.metVer) return;
   const r = await A().llamar('metrados');
   if (S.actual !== p.id) return;
-  S.metServ = r.metrados || []; S.metVer = r.version || '';
-  await kv.set('met:' + p.id, { version: S.metVer, lista: S.metServ });
+  S.metServ = r.metrados || []; S.metVer = r.version || ''; S.valServ = r.valorizaciones || [];
+  await kv.set('met:' + p.id, { version: S.metVer, lista: S.metServ, valorizaciones: S.valServ });
   aplicarMetrados();
 }
 
@@ -695,6 +696,9 @@ function pantallaPartida(item, volver = null) {
       <tr><td>Por verificar</td><td>${esc(fmtCant(a.pend, p.und))}</td></tr>
       ${a.obs ? `<tr><td>Observado</td><td>${esc(fmtCant(a.obs, p.und))}</td></tr>` : ''}
       <tr><td>Saldo</td><td>${p.contrato != null ? esc(fmtCant(p.contrato - a.ver, p.und)) : '—'}</td></tr>
+      ${verificador() && p.pu != null ? `<tr><td>Precio unitario</td><td>${fmtSoles(p.pu)}</td></tr>
+        <tr><td>Presupuesto de la partida</td><td>${fmtSoles(r2((p.contrato || 0) * p.pu))}</td></tr>
+        <tr><td>Valorizado (acumulado)</td><td>${fmtSoles(cerradas(S.valServ).reduce((s, v) => s + (v.partidas?.[item]?.[1] || 0), 0))}</td></tr>` : ''}
     </table>
     ${pasa ? '<p class="aviso-linea">Lo verificado supera el metrado del contrato: el exceso necesita el trámite de mayores metrados antes de valorizarse.</p>' : ''}
     ${S.eje && lst.some((m) => m.ini != null) ? tiraAvance(lst) : ''}
@@ -991,14 +995,205 @@ function exportarMetrados() {
       { nombre: 'Resumen', filas: [titulo, [], ...filasResumen(S.partidas, S.metrados, d, h)], negrita: 3, anchos: [14, 60, 7, 15, 15, 15, 15, 10, 15, 15, 10] },
       { nombre: 'Registros', filas: [titulo, [], ...filasDetalle(S.partidas, S.metrados, d, h, fmtProg)], negrita: 3, anchos: [11, 14, 45, 11, 11, 7, 12, 6, 13, 40, 30, 16, 12, 14, 35, 18, 18, 6, 35, 16] },
     ]);
-    const archivo = new File([blob], `metrados_${obra.replace(/\W+/g, '_')}_${d}_a_${h}.xlsx`, { type: blob.type });
-    // en el celular se abre «Compartir» (Drive, WhatsApp, correo…); en la PC se descarga
-    if (navigator.canShare?.({ files: [archivo] }) && matchMedia('(pointer: coarse)').matches) { await navigator.share({ files: [archivo] }).catch(() => {}); return; }
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(archivo); a.download = archivo.name; a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    await entregarArchivo(blob, `metrados_${obra.replace(/\W+/g, '_')}_${d}_a_${h}.xlsx`);
   };
   c.querySelector('#x-volver').onclick = () => pantallaMetrados();
+}
+
+// En el celular se abre «Compartir» (Drive, WhatsApp, correo…); en la PC se descarga
+async function entregarArchivo(blob, nombre) {
+  const archivo = new File([blob], nombre, { type: blob.type });
+  if (navigator.canShare?.({ files: [archivo] }) && matchMedia('(pointer: coarse)').matches) { await navigator.share({ files: [archivo] }).catch(() => {}); return; }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(archivo); a.download = archivo.name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+// ================= valorizaciones (fase 4) =================
+// Solo Acceso total y el administrador (ven precios y montos). La valorización N toma todos los metrados
+// VERIFICADOS hasta el fin del periodo que aún no se valorizaron; al cerrarla, el servidor recalcula todo,
+// congela los montos y esos metrados quedan VALORIZADOS. Solo la última se puede anular (administrador).
+const conValorizaciones = () => verificador() && !!proyActual()?.url && S.partidas.length > 0;
+const fmtSoles = (v) => 'S/ ' + (+v || 0).toLocaleString('es-PE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const diaSiguiente = (d) => { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + 1); return x.toISOString().slice(0, 10); };
+const finDeMes = (d) => { const x = new Date(d + 'T12:00:00'); return new Date(x.getFullYear(), x.getMonth() + 1, 0, 12).toISOString().slice(0, 10); };
+
+function notaMenuValorizaciones() {
+  const cer = cerradas(S.valServ), cd = cdContrato(S.partidas), acu = cer.reduce((s, v) => s + v.cd, 0);
+  return cer.length ? `${cer.length} cerrada${cer.length > 1 ? 's' : ''} · ${fmtPct(cd ? 100 * acu / cd : 0)}` : 'ninguna aún';
+}
+
+function pantallaValorizaciones() {
+  if (!conValorizaciones()) return;
+  const c0 = S.contrato, ok = contratoCompleto(c0), cer = cerradas(S.valServ), cdCont = cdContrato(S.partidas);
+  const acuCD = r2(cer.reduce((s, v) => s + v.cd, 0)), acuTotal = r2(cer.reduce((s, v) => s + v.total, 0));
+  const fIgv = ok ? 1 + c0.igv / 100 : 1.18, saldoAD = ok ? r2(c0.adelantoDirecto / fIgv - cer.reduce((s, v) => s + v.amortAD, 0)) : 0;
+  const lista = S.valServ.map((v, i) => ({ v, i })).sort((a, b) => b.v.n - a.v.n || (a.v.estado === 'ANULADA') - (b.v.estado === 'ANULADA'));
+  const sig = (cer.at(-1)?.n || 0) + 1;
+  const c = hoja('Valorizaciones', `
+    ${ok ? `<table class="tabla">
+        <tr><td>Monto del contrato (con IGV)</td><td>${fmtSoles(c0.montoContrato)}</td></tr>
+        <tr><td>Costo directo del contrato</td><td>${fmtSoles(cdCont)}</td></tr>
+        <tr><td>Costo directo valorizado</td><td>${fmtSoles(acuCD)}</td></tr>
+        <tr><td>Avance valorizado</td><td>${fmtPct(cdCont ? 100 * acuCD / cdCont : 0)}</td></tr>
+        <tr><td>Total valorizado (con IGV)</td><td>${fmtSoles(acuTotal)}</td></tr>
+        ${c0.adelantoDirecto ? `<tr><td>Adelanto directo por amortizar (sin IGV)</td><td>${fmtSoles(saldoAD)}</td></tr>` : ''}
+      </table>
+      <span class="barra-av" style="height:10px"><i style="width:${Math.min(100, cdCont ? 100 * acuCD / cdCont : 0)}%"></i></span>
+      <button class="btn primario" id="v-nueva" style="width:100%;margin-top:12px">＋ Preparar valorización N° ${sig}</button>`
+    : `<p class="aviso-linea">Faltan los datos del contrato (monto, gastos generales, utilidad e IGV). ${S.sesion?.rol === 'admin'
+      ? 'Complétalos en ☰ → Datos del proyecto → «7. Datos del contrato».' : 'Pídeselos al administrador.'}</p>`}
+    <h3 class="ficha-t">Valorizaciones</h3>
+    ${lista.map(({ v, i }) => `<button class="item ${v.estado === 'ANULADA' ? 'anulado' : ''}" data-i="${i}"><span class="crece"><span class="t">Valorización N° ${v.n}</span><br>
+      <span class="s">${fechaDia(v.ini)} al ${fechaDia(v.fin)} · ${v.nMetrados} metrados${v.cerradaPor ? ' · ' + esc(v.cerradaPor) : ''}</span></span>
+      <span class="der">${fmtSoles(v.total)}<br><span class="etq ${v.estado === 'CERRADA' ? 'ok' : 'gris'}">${esc(v.estado)}</span></span></button>`).join('')
+      || '<p class="ayuda">Todavía no hay valorizaciones cerradas.</p>'}
+    <p class="ayuda">Los montos se calculan con los precios unitarios del presupuesto (hoja PARTIDAS) y los datos del contrato. Solo los ven Acceso total y el administrador.</p>`);
+  c.querySelector('#v-nueva')?.addEventListener('click', () => prepararValorizacion());
+  c.querySelectorAll('[data-i]').forEach((b) => b.onclick = () => verValorizacion(S.valServ[+b.dataset.i]));
+  S.refrescarMet = pantallaValorizaciones;
+}
+
+function prepararValorizacion(f = null) {
+  const c0 = S.contrato, cer = cerradas(S.valServ), ult = cer.at(-1), n = (ult?.n || 0) + 1;
+  if (S.metPend.length) return mostrarAviso('Primero se tienen que enviar los cambios de metrados pendientes (necesitas señal)');
+  const ini0 = ult ? diaSiguiente(ult.fin) : c0.inicio || hoyLocal().slice(0, 8) + '01';
+  f = f || { ini: ini0, fin: finDeMes(ini0), k: '1', dedReajuste: '', amortAD: '', amortAM: '', retencion: '', otros: '', documento: '', obs: '' };
+  const c = hoja(`Valorización N° ${n}`, `
+    <button class="btn volver" id="vp-volver">‹ Volver</button>
+    <p class="ayuda">Entran todos los metrados <b>verificados</b> hasta el fin del periodo que aún no se valorizaron (también los de meses anteriores verificados tarde). Lo «por verificar» no entra.</p>
+    <div class="fila"><div class="crece"><label class="campo" for="vp-ini">Desde</label><input id="vp-ini" type="date" value="${esc(f.ini)}" ${ult ? `min="${diaSiguiente(ult.fin)}"` : ''}></div>
+      <div class="crece"><label class="campo" for="vp-fin">Hasta</label><input id="vp-fin" type="date" value="${esc(f.fin)}"></div></div>
+    <div id="vp-res"></div>
+    <h3 class="ficha-t">Reajuste y descuentos</h3>
+    <label class="campo" for="vp-k">Coeficiente de reajuste K (fórmula polinómica)</label><input id="vp-k" type="text" inputmode="decimal" value="${esc(f.k)}">
+    <label class="campo" for="vp-ded">Deducción del reajuste que no corresponde por adelantos (S/)</label><input id="vp-ded" type="text" inputmode="decimal" value="${esc(f.dedReajuste)}" placeholder="0.00">
+    <label class="campo" for="vp-ad">Amortización del adelanto directo, sin IGV (S/)</label><input id="vp-ad" type="text" inputmode="decimal" value="${esc(f.amortAD)}"><p class="ayuda" id="vp-ad-ayuda"></p>
+    <label class="campo" for="vp-am">Amortización del adelanto para materiales, sin IGV (S/)</label><input id="vp-am" type="text" inputmode="decimal" value="${esc(f.amortAM)}" placeholder="0.00"><p class="ayuda" id="vp-am-ayuda"></p>
+    <label class="campo" for="vp-ret">Retención de garantía de fiel cumplimiento (S/)</label><input id="vp-ret" type="text" inputmode="decimal" value="${esc(f.retencion)}"><p class="ayuda" id="vp-ret-ayuda"></p>
+    <label class="campo" for="vp-otros">Otros descuentos: penalidades u otros (S/)</label><input id="vp-otros" type="text" inputmode="decimal" value="${esc(f.otros)}" placeholder="0.00">
+    <label class="campo" for="vp-doc">Documento (informe o carta de la valorización)</label><input id="vp-doc" type="text" value="${esc(f.documento)}">
+    <label class="campo" for="vp-obs">Observaciones</label><textarea id="vp-obs">${esc(f.obs)}</textarea>
+    <div id="vp-resumen"></div>
+    <div class="botones"><button class="btn" id="vp-cancel">Cancelar</button><button class="btn primario" id="vp-ok">Cerrar valorización N° ${n}</button></div>`);
+  const num = (sel) => { const t = c.querySelector(sel).value.trim().replace(',', '.'); return t === '' ? null : +t; };
+  let p = null;
+  const calcular = () => {
+    Object.assign(f, { ini: c.querySelector('#vp-ini').value, fin: c.querySelector('#vp-fin').value });
+    ['k', 'dedReajuste', 'amortAD', 'amortAM', 'retencion', 'otros'].forEach((k, i) => { f[k] = c.querySelectorAll('#vp-k, #vp-ded, #vp-ad, #vp-am, #vp-ret, #vp-otros')[i].value; });
+    f.documento = c.querySelector('#vp-doc').value; f.obs = c.querySelector('#vp-obs').value;
+    if (!f.fin) { c.querySelector('#vp-res').innerHTML = '<p class="aviso-linea">Elige el fin del periodo.</p>'; p = null; return; }
+    p = preparar({ partidas: S.partidas, metrados: S.metrados, valorizaciones: S.valServ, contrato: c0, fin: f.fin, k: num('#vp-k') ?? 1, dedReajuste: num('#vp-ded') ?? 0,
+      amortAD: num('#vp-ad'), amortAM: num('#vp-am') ?? 0, retencion: num('#vp-ret'), otros: num('#vp-otros') ?? 0 });
+    const pend = S.metrados.filter((m) => (m.estado === 'REGISTRADO' || m.estado === 'OBSERVADO') && m.fecha && m.fecha <= f.fin).length;
+    const filas = Object.entries(p.det).sort((a, b) => a[0].localeCompare(b[0], 'es', { numeric: true }));
+    c.querySelector('#vp-res').innerHTML = `
+      <p class="caja"><b>${p.sel.length}</b> metrados verificados entran · <b>${filas.length}</b> partidas</p>
+      ${pend ? `<p class="aviso-linea">${pend} metrado(s) hasta el ${fechaDia(f.fin)} siguen «por verificar» u observados: no entran en esta valorización.</p>` : ''}
+      ${p.sinPU.length ? `<p class="aviso-linea mal">Sin precio unitario en PARTIDAS: ${p.sinPU.map(esc).join(', ')}. Así no se puede cerrar.</p>` : ''}
+      ${filas.length ? `<table class="tabla vol"><tr><th>Partida</th><th>Metrado</th><th>S/</th></tr>
+        ${filas.map(([it, [q, s]]) => `<tr><td>${esc(it)} <span class="s">${esc(cortar(partidaDe(it)?.desc || '', 26))}</span></td><td>${esc(fmtCant(q, partidaDe(it)?.und))}</td><td>${s.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</td></tr>`).join('')}</table>` : ''}`;
+    c.querySelector('#vp-ad-ayuda').textContent = `Propuesto: ${fmtSoles(p.propuestas.amortAD)} (proporcional al adelanto). Saldo por amortizar: ${fmtSoles(p.saldos.AD)}. Vacío = propuesto.`;
+    c.querySelector('#vp-am-ayuda').textContent = `Saldo por amortizar: ${fmtSoles(p.saldos.AM)} (se calcula según la directiva de fórmulas polinómicas).`;
+    c.querySelector('#vp-ret-ayuda').textContent = `Propuesto: ${fmtSoles(p.propuestas.retencion)} (${c0.retencion ?? 0} % del total). Falta retener: ${fmtSoles(p.saldos.ret)}. Vacío = propuesto.`;
+    c.querySelector('#vp-resumen').innerHTML = `<h3 class="ficha-t">Resumen</h3><table class="tabla">
+      <tr><td>Costo directo</td><td>${fmtSoles(p.cd)}</td></tr>
+      <tr><td>Gastos generales (${c0.gg} %)</td><td>${fmtSoles(p.gg)}</td></tr>
+      <tr><td>Utilidad (${c0.utilidad} %)</td><td>${fmtSoles(p.ut)}</td></tr>
+      <tr class="total"><td>Valorización bruta</td><td>${fmtSoles(p.bruta)}</td></tr>
+      ${p.reaj ? `<tr><td>Reajuste (K = ${p.k})</td><td>${fmtSoles(p.reaj)}</td></tr>` : ''}
+      ${p.dedReajuste ? `<tr><td>Deducción del reajuste</td><td>− ${fmtSoles(p.dedReajuste)}</td></tr>` : ''}
+      ${p.amortAD ? `<tr><td>Amortización adelanto directo</td><td>− ${fmtSoles(p.amortAD)}</td></tr>` : ''}
+      ${p.amortAM ? `<tr><td>Amortización adelanto materiales</td><td>− ${fmtSoles(p.amortAM)}</td></tr>` : ''}
+      <tr><td>Subtotal sin IGV</td><td>${fmtSoles(p.sub)}</td></tr>
+      <tr><td>IGV (${c0.igv} %)</td><td>${fmtSoles(p.igv)}</td></tr>
+      <tr class="total"><td>Total (con IGV)</td><td>${fmtSoles(p.total)}</td></tr>
+      ${p.retencion ? `<tr><td>Retención de garantía</td><td>− ${fmtSoles(p.retencion)}</td></tr>` : ''}
+      ${p.otros ? `<tr><td>Otros descuentos</td><td>− ${fmtSoles(p.otros)}</td></tr>` : ''}
+      <tr class="total"><td>Neto a pagar</td><td>${fmtSoles(p.neto)}</td></tr></table>`;
+  };
+  c.querySelectorAll('input, textarea').forEach((x) => x.addEventListener('input', calcular));
+  calcular();
+  c.querySelector('#vp-volver').onclick = pantallaValorizaciones;
+  c.querySelector('#vp-cancel').onclick = pantallaValorizaciones;
+  c.querySelector('#vp-ok').onclick = async () => {
+    calcular();
+    if (!p) return;
+    if (!f.ini || f.fin < f.ini) return mostrarAviso('El periodo no es válido');
+    if (!p.sel.length) return mostrarAviso('No hay metrados verificados por valorizar hasta esa fecha');
+    if (p.sinPU.length) return mostrarAviso('Hay partidas sin precio unitario');
+    if (p.amortAD > p.saldos.AD + 0.01 || p.amortAM > p.saldos.AM + 0.01) return mostrarAviso('La amortización supera el saldo del adelanto');
+    if (p.neto < 0) return mostrarAviso('Los descuentos superan el monto de la valorización');
+    if (!navigator.onLine) return mostrarAviso('Necesitas internet para cerrar la valorización');
+    if (!confirm(`¿Cerrar la valorización N° ${n} (${fechaDia(f.ini)} al ${fechaDia(f.fin)})?\n\nTotal ${fmtSoles(p.total)} · neto ${fmtSoles(p.neto)}.\n`
+      + `Sus ${p.sel.length} metrados quedan VALORIZADOS y ya no se podrán cambiar.`)) return;
+    const b = c.querySelector('#vp-ok'); b.disabled = true; b.textContent = 'Cerrando…';
+    try {
+      const r = await A().llamar('valorizacion_cerrar', {
+        n, ini: f.ini, fin: f.fin, nMetrados: p.sel.length, k: p.k, dedReajuste: p.dedReajuste, amortAD: p.amortAD, amortAM: p.amortAM,
+        retencion: p.retencion, otros: p.otros, documento: f.documento.trim(), obs: f.obs.trim(),
+      });
+      await cargarMetrados(true);
+      const v = S.valServ.find((x) => x.n === r.n && x.estado === 'CERRADA');
+      mostrarAviso(`Valorización N° ${r.n} cerrada: total ${fmtSoles(r.total)}`, 'info');
+      if (v) verValorizacion(v); else pantallaValorizaciones();
+    } catch (e) {
+      b.disabled = false; b.textContent = `Cerrar valorización N° ${n}`;
+      if (!(await manejarAcceso(e))) mostrarAviso('No se cerró la valorización: ' + e.message);
+    }
+  };
+}
+
+function verValorizacion(v) {
+  if (!v) return;
+  const c0 = S.contrato || {}, cer = cerradas(S.valServ), ultima = cer.at(-1);
+  const anulable = S.sesion?.rol === 'admin' && v.estado === 'CERRADA' && ultima?.n === v.n;
+  const filas = Object.entries(v.partidas || {}).sort((a, b) => a[0].localeCompare(b[0], 'es', { numeric: true }));
+  const linea = (t, x, menos = false) => (x ? `<tr><td>${t}</td><td>${menos ? '− ' : ''}${fmtSoles(x)}</td></tr>` : '');
+  const c = hoja(`Valorización N° ${v.n}`, `
+    <button class="btn volver" id="vv-volver">‹ Volver</button>
+    <p>${fechaDia(v.ini)} al ${fechaDia(v.fin)} · <span class="etq ${v.estado === 'CERRADA' ? 'ok' : 'gris'}">${esc(v.estado)}</span></p>
+    ${v.estado === 'ANULADA' ? `<p class="aviso-linea mal">Anulada por ${esc(v.anuladaPor)} el ${fechaCorta(v.anulada)}: ${esc(v.motivoAnulacion)}</p>` : ''}
+    <table class="tabla">
+      ${linea('Costo directo', v.cd)}${linea(`Gastos generales (${c0.gg ?? '—'} %)`, v.gg)}${linea(`Utilidad (${c0.utilidad ?? '—'} %)`, v.utilidad)}
+      <tr class="total"><td>Valorización bruta</td><td>${fmtSoles(v.bruta)}</td></tr>
+      ${linea(`Reajuste (K = ${v.k})`, v.reajuste)}${linea('Deducción del reajuste', v.dedReajuste, true)}
+      ${linea('Amortización adelanto directo', v.amortAD, true)}${linea('Amortización adelanto materiales', v.amortAM, true)}
+      ${linea('Subtotal sin IGV', v.subtotal)}${linea(`IGV (${c0.igv ?? '—'} %)`, v.igv)}
+      <tr class="total"><td>Total (con IGV)</td><td>${fmtSoles(v.total)}</td></tr>
+      ${linea('Retención de garantía', v.retencion, true)}${linea('Otros descuentos', v.otros, true)}
+      <tr class="total"><td>Neto a pagar</td><td>${fmtSoles(v.neto)}</td></tr>
+    </table>
+    <p class="ayuda">${v.nMetrados} metrados · cerrada por ${esc(v.cerradaPor || '—')}${v.cerrada ? ' el ' + fechaCorta(v.cerrada) : ''}${v.documento ? ' · ' + esc(v.documento) : ''}</p>
+    ${v.obs ? `<p class="ayuda">${esc(v.obs)}</p>` : ''}
+    <button class="btn primario" id="vv-xlsx" style="width:100%;margin-top:6px">Descargar Excel de la valorización</button>
+    <h3 class="ficha-t">Partidas del periodo (${filas.length})</h3>
+    <table class="tabla vol"><tr><th>Partida</th><th>Metrado</th><th>S/</th></tr>
+      ${filas.map(([it, [q, s]]) => `<tr><td>${esc(it)} <span class="s">${esc(cortar(partidaDe(it)?.desc || '', 26))}</span></td><td>${esc(fmtCant(q, partidaDe(it)?.und))}</td><td>${s.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</td></tr>`).join('')}
+    </table>
+    ${anulable ? `<h3 class="ficha-t">Anular la valorización</h3>
+      <p class="ayuda">Solo si la Entidad la observó o hay un error: sus metrados vuelven a «verificado» y se prepara otra vez. Queda registrada como anulada.</p>
+      <textarea id="vv-motivo" placeholder="Motivo de la anulación"></textarea>
+      <button class="btn peligro" id="vv-anular" style="width:100%;margin-top:8px">Anular valorización N° ${v.n}</button>` : ''}`);
+  c.querySelector('#vv-volver').onclick = pantallaValorizaciones;
+  c.querySelector('#vv-xlsx').onclick = async () => {
+    const antes = cer.filter((x) => x.n < v.n), obra = proyActual()?.nombre || 'Obra';
+    const blob = libroXlsx([{ nombre: `Valorización ${v.n}`, filas: filasExcel({ obra, v, partidas: S.partidas, antes, contrato: c0, cdCont: cdContrato(S.partidas) }),
+      negrita: 5, anchos: [14, 55, 7, 13, 11, 15, 13, 14, 13, 14, 13, 15, 9, 13, 15] }]);
+    await entregarArchivo(blob, `valorizacion_${v.n}_${obra.replace(/\W+/g, '_')}_${v.ini}_a_${v.fin}${v.estado === 'ANULADA' ? '_ANULADA' : ''}.xlsx`);
+  };
+  c.querySelector('#vv-anular')?.addEventListener('click', async () => {
+    const motivo = c.querySelector('#vv-motivo').value.trim();
+    if (!motivo) { c.querySelector('#vv-motivo').focus(); return mostrarAviso('Escribe el motivo de la anulación'); }
+    if (!navigator.onLine) return mostrarAviso('Necesitas internet para anular la valorización');
+    if (!confirm(`¿Anular la valorización N° ${v.n}? Sus ${v.nMetrados} metrados vuelven a «verificado».`)) return;
+    try {
+      const r = await A().llamar('valorizacion_anular', { n: v.n, motivo });
+      await cargarMetrados(true);
+      mostrarAviso(`Valorización N° ${v.n} anulada: ${r.metrados} metrados volvieron a «verificado»`, 'info');
+      pantallaValorizaciones();
+    } catch (e) { if (!(await manejarAcceso(e))) mostrarAviso('No se anuló: ' + e.message); }
+  });
 }
 
 // ---- láminas de planos (SVG del expediente) ----
@@ -1645,6 +1840,7 @@ function aplicarDatos(datos) {
   const firmaS = S.secJuegos.map((j) => j.clave + '|' + j.actualizado).join(';');
   if (firmaS !== S.secFirma) { S.secFirma = firmaS; colaSecciones(); }
   S.partidas = leerPartidas(datos.partidas);
+  S.contrato = datos.contrato || null; // solo llega a Acceso total y al administrador
   // la capa de avance solo aparece para quien ve los metrados
   if (conMetrados() !== !!S.capaAvance) {
     if (conMetrados()) capas.addOverlay(G.avance, 'Avance de metrados'); else { capas.removeLayer(G.avance); G.avance.remove(); }
@@ -1669,7 +1865,7 @@ async function abrirProyecto(id) {
   S.elemPend = (await kv.get('elem_pend:' + id)) || [];
   S.metPend = (await kv.get('met_pend:' + id)) || [];
   const met = await kv.get('met:' + id);
-  S.metServ = met?.lista || []; S.metVer = met?.version || '';
+  S.metServ = met?.lista || []; S.metVer = met?.version || ''; S.valServ = met?.valorizaciones || [];
   // logo cargado en este celular para esta obra (tiene prioridad sobre el del proyecto)
   const ll = await kv.get('logo:' + id);
   S.logoLocal = ll ? imagenDe(ll) : null;
@@ -1687,7 +1883,7 @@ function vaciarPantalla() {
   Object.values(S.lamURL).forEach((u) => URL.revokeObjectURL(u));
   Object.assign(S, { datos: null, eje: null, ejeLL: null, elementos: [], puntos: [], secciones: [], obs: [], logo: null, logoLocal: null, pendientes: 0,
     laminas: [], lamCache: {}, lamURL: {}, lamFirma: '', elemPend: [], secJuegos: [], secCache: {}, secFirma: '',
-    partidas: [], metServ: [], metPend: [], metrados: [], metVer: '' });
+    partidas: [], metServ: [], metPend: [], metrados: [], metVer: '', contrato: null, valServ: [] });
   dibujarProyecto();
   $('#btn-menu').dataset.n = '';
 }
@@ -1980,6 +2176,7 @@ function menu() {
     <button data-a="ficha"><span class="ic">📋</span>Ficha de esta progresiva<span class="nota">sección y paquete</span></button>
     <button data-a="puntos"><span class="ic">📍</span>Puntos de control<span class="nota">${S.puntos.length}</span></button>
     ${conMetrados() ? `<button data-a="met"><span class="ic">📏</span>Metrados ejecutados<span class="nota">${notaMenuMetrados()}</span></button>` : ''}
+    ${conValorizaciones() ? `<button data-a="val"><span class="ic">💰</span>Valorizaciones<span class="nota">${notaMenuValorizaciones()}</span></button>` : ''}
     ${puede('tecnico') && S.secJuegos.length ? '<button data-a="vol"><span class="ic">📐</span>Volúmenes por tramo<span class="nota">según secciones</span></button>' : ''}
     <button data-a="elementos"><span class="ic">🧱</span>Elementos de obra<span class="nota">${S.elementos.length}</span></button>
     <button data-a="obs"><span class="ic">📝</span>Observaciones<span class="nota">${S.obs.filter((o) => o.estado !== 'ANULADA').length}${pend ? ` · ${pend} por enviar` : ''}</span></button>
@@ -1997,7 +2194,7 @@ function menu() {
     gps: () => { cerrarHoja(); pausarGPS(!S.pausado); },
     actualizar: () => { cerrarHoja(); actualizarDatos(true, true); }, ajustes: pantallaAjustes, sello: pantallaSello, demo: pantallaDemo, ayuda: pantallaAyuda,
     usuarios: pantallaUsuarios, datos: () => { location.href = 'admin.html'; }, salir: cerrarSesion,
-    ficha: fichaAqui, puntos: pantallaPuntos, vol: pantallaVolumenes, met: () => pantallaMetrados(),
+    ficha: fichaAqui, puntos: pantallaPuntos, vol: pantallaVolumenes, met: () => pantallaMetrados(), val: pantallaValorizaciones,
   })[b.dataset.a]());
 }
 
@@ -2656,6 +2853,7 @@ function pantallaAyuda() {
       <li>Técnicos y administrador: en el elemento, <b>✎ Editar / mover</b> para cambiar su progresiva o lado (con tu GPS o la mira del mapa), su estado o anularlo; en ☰ → Elementos de obra, <b>＋ Nuevo elemento</b>. Cada cambio pide el motivo y el documento y queda en el <b>historial</b>; la ubicación del expediente se ve como un punto gris.</li>
       <li>Toca la vía o la progresiva de arriba para abrir la <b>ficha de esa progresiva</b>: curva, sección transversal, láminas de la sección típica del plano (tócalas para ampliar), paquete estructural, elementos, metrados, puntos de control y observaciones cercanas.</li>
       <li>Técnicos: ☰ → <b>Metrados ejecutados</b> → <b>＋ Registrar metrado</b>: partida, fecha, tramo (con tu GPS o la mira), lado, cantidad, sustento y fotos. «Calcular» propone el metrado con las secciones del tramo. Queda <b>por verificar</b> hasta que Acceso total o el administrador lo verifique u observe; solo lo verificado suma al avance. En el mapa, capa «Avance de metrados».</li>
+      <li>Acceso total y administrador: ☰ → <b>Valorizaciones</b> prepara la valorización del mes con los metrados verificados (P.U., gastos generales, utilidad, reajuste, amortizaciones, IGV y retención), la cierra y la descarga en Excel.</li>
       <li>Para ahorrar batería: ☰ → <b>Pausar GPS</b>.</li>
     </ol>
     <p class="ayuda">En iPhone, los avisos funcionan con la app abierta y la pantalla encendida.</p>`);
