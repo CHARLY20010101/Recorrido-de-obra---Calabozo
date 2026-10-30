@@ -330,7 +330,7 @@ body.recorrido #mira { display: none; }
 .botones { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 16px; }
 
 label.campo { display: block; margin: 14px 0 6px; font-weight: 700; font-size: 15px; }
-input[type=text], input[type=number], input[type=search], textarea, select {
+input[type=text], input[type=number], input[type=search], input[type=date], textarea, select {
   width: 100%; font: inherit; padding: 12px; border: 1px solid var(--borde); border-radius: 10px; background: #fff;
 }
 textarea { min-height: 96px; resize: vertical; }
@@ -369,6 +369,27 @@ textarea { min-height: 96px; resize: vertical; }
 .hist { padding: 10px 2px; border-bottom: 1px solid var(--borde); font-size: 14px; }
 .hist .s { color: var(--suave); font-size: 13px; }
 .hist.pend { background: #fff8e1; border-radius: 8px; padding: 8px 10px; margin-bottom: 6px; }
+
+/* metrados ejecutados */
+.rojo { color: var(--mal); }
+.item.partida .crece { flex: 1; min-width: 0; }
+.item .crece { flex: 1; min-width: 0; }
+.barra-av { display: flex; height: 7px; margin-top: 6px; border-radius: 4px; background: var(--chip); overflow: hidden; }
+.barra-av i { display: block; height: 100%; background: var(--ok); }
+.barra-av i.pend { background: #f9a825; }
+.grupo-met { margin: 16px 0 2px; font-size: 14px; color: var(--azul); text-transform: none; border-bottom: 2px solid var(--chip); padding-bottom: 3px; }
+.ayuda.marca { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+.btn.volver { min-height: 38px; padding: 0 12px; border-width: 1px; font-size: 15px; margin-bottom: 6px; }
+.opciones { max-height: 300px; overflow-y: auto; border: 1px solid var(--borde); border-radius: 10px; margin-top: 6px; }
+.opciones button { display: block; width: 100%; text-align: left; padding: 10px; border: 0; border-bottom: 1px solid var(--borde); background: #fff; font: inherit; font-size: 15px; color: var(--texto); }
+.opciones button.sel { background: #e3f0fb; }
+.opciones .s { color: var(--suave); }
+.tira-av { margin: 10px 0; }
+.tira-av svg { display: block; width: 100%; height: 24px; border-radius: 4px; }
+.tira-pie { display: flex; justify-content: space-between; gap: 6px; font-size: 12px; color: var(--suave); margin-top: 3px; }
+.tira-pie i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; margin: 0 2px 0 6px; }
+.tira-pie i.v { background: #2e7d32; }
+.tira-pie i.p { background: #f9a825; }
 #elegir {
   position: fixed; left: 12px; right: 12px; bottom: calc(84px + env(safe-area-inset-bottom)); z-index: 1300;
   background: #fff; border-radius: 14px; padding: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.3);

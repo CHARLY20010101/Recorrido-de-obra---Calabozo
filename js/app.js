@@ -8,8 +8,10 @@ import { leerSecciones, seccionEn, svgSeccion } from './seccion.js';
 import { abrirCamara, componer, ESTILO_BASE } from './camara.js';
 import { abrirVisor, medidas, miniatura, nombreCorto } from './laminas.js';
 import { svgTransversal, tipoSeccion, cotaEn, nombreFuente, colorFuente } from './transversal.js';
+import { leerPartidas, leerMetrados, avance, cuenta, porVerificar, LADOS_MET, grupoDe, calcular, filasResumen, filasDetalle } from './metrados.js';
+import { libroXlsx } from './xlsx.js';
 
-const VERSION_APP = '2.4.0';
+const VERSION_APP = '3.0.0';
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const RAD = Math.PI / 180;
@@ -34,6 +36,7 @@ const S = {
   proyectos: [], actual: null, datos: null, eje: null, tipos: {}, elementos: [], puntos: [], secciones: [],
   laminas: [], lamCache: {}, lamURL: {}, lamSel: null, lamFirma: '', elemPend: [],
   secJuegos: [], secCache: {}, secFirma: '', transURL: null,
+  partidas: [], metServ: [], metPend: [], metrados: [], metVer: '',
   ajustes: { ...AJUSTES_BASE }, obs: [],
   pos: null, u: null, watch: null, pausado: false, gpsError: '', enVia: false, seguir: true, sim: null, wake: null,
   hist: [], dir: 1, ultTramo: null, avisados: new Set(), fueraCont: 0, avisoFuera: false,
@@ -67,7 +70,8 @@ const G = {
   elem: L.layerGroup().addTo(mapa), bm: L.layerGroup(), obs: L.layerGroup().addTo(mapa), yo: L.layerGroup().addTo(mapa),
 };
 G.marca = L.layerGroup().addTo(mapa); // punto de la ficha de progresiva abierta
-L.control.layers(capasBase, {
+G.avance = L.layerGroup(); // tramos con metrados ejecutados (solo Técnico o más)
+const capas = L.control.layers(capasBase, {
   'Elementos de obra': G.elem, 'Observaciones': G.obs, 'Puntos de control (BM)': G.bm, 'Marcas cada 100 m': G.cien,
 }, { position: 'topright' }).addTo(mapa);
 L.control.zoom({ position: 'topleft' }).addTo(mapa);
@@ -134,6 +138,7 @@ function dibujarProyecto() {
       .bindPopup(() => popupPunto(p)).addTo(G.bm);
   }
   dibujarObs();
+  dibujarAvance();
 }
 
 // ---- puntos de control (red geodésica y BM) ----
@@ -269,6 +274,9 @@ function fichaProgresiva(prog) {
     ${elems.map(({ e, d }) => `<button class="item ${e.estado === 'ANULADO' ? 'anulado' : ''}" data-e="${S.elementos.indexOf(e)}">${miniTipo(e.tipo, e.estado === 'ANULADO' ? '#9e9e9e' : colorTipo(e.tipo))}
       <span><span class="t">${esc(e.codigo)}</span>${e.estado !== 'PENDIENTE' ? ' ' + etqEstadoElem(e.estado) : ''}<br><span class="s">${esc(e.desc)}</span></span>
       <span class="der">${d === 0 ? 'aquí' : `${Math.abs(Math.round(d))} m ${d > 0 ? 'adelante' : 'atrás'}`}<br><span class="s">${e.lado || ''}</span></span></button>`).join('') || '<p class="ayuda">Ninguno en este tramo.</p>'}
+    ${conMetrados() ? `<h3 class="ficha-t">Metrados ejecutados aquí</h3>
+      ${metradosEn(prog).slice(0, 8).map(itemMetrado).join('') || '<p class="ayuda">Ningún metrado registrado que pase por esta progresiva.</p>'}
+      <button class="btn" id="fk-met" style="width:100%;margin-top:6px">＋ Registrar metrado aquí</button>` : ''}
 
     <h3 class="ficha-t">Puntos de control más cercanos</h3>
     ${ptos.map(({ p, d }) => `<button class="item" data-c="${esc(p.codigo)}"><span class="ico-punto">${svgPunto(p.tipo, p.estado, 22)}</span>
@@ -300,6 +308,8 @@ function fichaProgresiva(prog) {
   c.querySelector('#fk-mapa').onclick = () => { cerrarHoja(); setSeguir(false); mapa.setView(pt, Math.max(mapa.getZoom(), 17)); };
   c.querySelector('#fk-obs').onclick = () => abrirObs(null, { prog, off: 0, fuente: 'Ficha de progresiva' });
   c.querySelector('#fk-elem')?.addEventListener('click', () => editarElemento(null, { prog }));
+  c.querySelector('#fk-met')?.addEventListener('click', () => editarMetrado(null, { ini: Math.round(prog) }));
+  c.querySelectorAll('[data-m]').forEach((b) => b.onclick = () => verMetrado(b.dataset.m, () => fichaProgresiva(prog)));
   S.fichaProg = { prog, curva, sec, tipo: null };
   pintarTransversal();
   pintarLaminaFicha();
@@ -451,6 +461,544 @@ function pantallaVolumenes() {
     ${faltan ? `<p class="aviso-linea">Faltan descargar ${faltan} paquete(s) de secciones: los totales están incompletos.</p>` : ''}
     <p class="ayuda">Volúmenes por áreas medias entre secciones consecutivas, con las áreas de corte (AC) y relleno (AR) de cada fuente.
       Sirven para comparar fuentes y tramos; no reemplazan el metrado de pago, que se sustenta con protocolos y levantamientos aprobados.</p>`);
+}
+
+// ================= metrados ejecutados (fase 3) =================
+// Un Técnico registra lo ejecutado por partida y tramo; Acceso total o el administrador lo verifica u
+// observa, y solo lo verificado suma al avance. Los registros tienen su propia versión en el servidor;
+// lo hecho sin señal queda en cola (met_pend) y se ve como si ya estuviera guardado.
+const conMetrados = () => puede('tecnico') && S.partidas.length > 0;
+const verificador = () => puede('total');
+const partidaDe = (item) => S.partidas.find((p) => p.item === item);
+const norm = (t) => String(t).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+// cada palabra buscada tiene que estar (sin importar tildes ni el orden): "excavacion suelto" encuentra la 01.02.02
+const coincide = (q, texto) => { const t = norm(texto); return norm(q).split(/\s+/).filter(Boolean).every((p) => t.includes(p)); };
+const cortar = (t, n) => (t.length > n ? t.slice(0, n - 1) + '…' : t);
+const fmtCant = (v, und = '') => `${(+v || 0).toLocaleString('es-PE', { maximumFractionDigits: und === 'ha' || und === 'km' ? 4 : 2 })} ${und}`.trim();
+const fmtPct = (v) => (v > 0 && v < 0.1 ? '<0.1' : v.toFixed(1)) + ' %';
+const fechaDia = (f) => (f ? String(f).split('-').reverse().join('/') : '—');
+const hoyLocal = () => new Date(Date.now() - new Date().getTimezoneOffset() * 6e4).toISOString().slice(0, 10);
+const CLASE_MET = { VERIFICADO: 'ok', VALORIZADO: 'ok', OBSERVADO: 'mal', ANULADO: 'gris', REGISTRADO: 'info' };
+const etqMet = (m) => `<span class="etq ${CLASE_MET[m.estado] || ''}">${m.estado === 'REGISTRADO' ? 'POR VERIFICAR' : esc(m.estado)}</span>${m.pendiente ? ' <span class="etq pend">por enviar</span>' : ''}`;
+const ACCION_MET = { REGISTRADO: 'Registrado', EDITADO: 'Corregido', CORREGIDO: 'Corregido tras la observación', VERIFICADO: 'Verificado', OBSERVADO: 'Observado',
+  REABIERTO: 'Reabierto', ANULADO: 'Anulado', RESTAURADO: 'Restaurado', EDICION_HOJA: 'Editado en la hoja' };
+const ladoMet = (l) => (l === 'AMBOS' ? 'ambos lados' : l);
+const ubicMet = (m) => (m.ini != null ? `Km ${fmtUbic(m.ini, m.fin)}${m.lado ? ' · ' + ladoMet(m.lado) : ''}` : 'Sin tramo (partida global)');
+const puedeEditarMet = (m) => !['ANULADO', 'VALORIZADO'].includes(m.estado) && (verificador() || (m.mio && m.estado !== 'VERIFICADO'));
+const puedeAnularMet = (m) => !['ANULADO', 'VALORIZADO'].includes(m.estado) && (verificador() || (m.mio && m.estado !== 'VERIFICADO'));
+
+function notaMenuMetrados() {
+  const n = verificador() ? S.metrados.filter(porVerificar).length : S.metrados.filter((m) => m.mio && m.estado === 'OBSERVADO').length;
+  if (!n) return `${S.partidas.filter((p) => !p.titulo).length} partidas`;
+  return verificador() ? `<b class="rojo">${n} por verificar</b>` : `<b class="rojo">${n} observado${n > 1 ? 's' : ''}</b>`;
+}
+
+async function cargarMetrados(forzar = false, version = null) {
+  const p = proyActual();
+  if (!p?.url || !conMetrados() || !navigator.onLine) return;
+  if (!forzar && version != null && S.metVer && version === S.metVer) return;
+  const r = await A().llamar('metrados');
+  if (S.actual !== p.id) return;
+  S.metServ = r.metrados || []; S.metVer = r.version || '';
+  await kv.set('met:' + p.id, { version: S.metVer, lista: S.metServ });
+  aplicarMetrados();
+}
+
+// Aplica a la lista los cambios hechos en el teléfono (registros, correcciones, fotos y cambios de estado)
+function conOps(lista, ops) {
+  const out = lista.map((m) => ({ ...m }));
+  for (const op of ops) {
+    const id = op.op === 'estado' ? op.id : op.m.id;
+    let m = out.find((x) => x.id === id);
+    if (op.op === 'guardar') {
+      if (!m) { m = { id, estado: 'REGISTRADO', registradoPor: S.sesion?.nombre || S.ajustes.nombre, registrado: new Date(op.t).toISOString(), mio: true, fotos: [] }; out.push(m); }
+      if (!op.soloFotos) {
+        Object.assign(m, op.m, { und: partidaDe(op.m.partida)?.und || m.und });
+        if (m.estado === 'OBSERVADO') m.estado = 'REGISTRADO';
+      }
+      if (op.fotos?.length) m.fotosLocal = [...(m.fotosLocal || []), ...op.fotos];
+    } else if (m) {
+      Object.assign(m, { estado: op.estado, nota: op.nota });
+      if (op.estado === 'VERIFICADO' || op.estado === 'OBSERVADO') Object.assign(m, { revisadoPor: S.sesion?.nombre || S.ajustes.nombre, revisado: new Date(op.t).toISOString() });
+    }
+    if (m) m.pendiente = true;
+  }
+  return out;
+}
+
+function aplicarMetrados() {
+  S.metrados = leerMetrados(conOps(S.metServ, S.metPend));
+  dibujarAvance();
+  // la pantalla de metrados abierta se pone al día (sin perder dónde estabas)
+  if (S.refrescarMet && !$('#hoja').classList.contains('oculto')) {
+    const y = $('#hoja-cuerpo').scrollTop, f = S.refrescarMet;
+    f(); $('#hoja-cuerpo').scrollTop = y;
+  }
+  pintarEstado();
+}
+
+async function guardarOpMet(op) {
+  const p = proyActual();
+  op.t = Date.now();
+  if (!p.url) {
+    // proyecto de archivo: queda solo en este teléfono
+    S.metServ = conOps(S.metServ, [op]).map(({ pendiente: _, ...m }) => m);
+    await kv.set('met:' + p.id, { version: '', lista: S.metServ });
+    aplicarMetrados();
+    return mostrarAviso('Guardado en este teléfono', 'info');
+  }
+  S.metPend.push(op);
+  await kv.set('met_pend:' + p.id, S.metPend);
+  aplicarMetrados();
+  mostrarAviso(navigator.onLine ? 'Guardado. Enviando…' : 'Guardado en el teléfono. Se enviará cuando haya señal.', 'info');
+  await sincronizar();
+}
+
+// Tramos con metrados sobre el eje: línea llena = verificado, a rayas = por verificar; LI y LD a cada lado del eje
+const COLOR_GRUPO = { '01.01': '#546e7a', '01.02': '#8d6e63', '01.03': '#263238', '01.04': '#00897b', '01.05': '#5d4037', '01.06': '#c62828', '01.08': '#7cb342', '02.01': '#c62828' };
+function dibujarAvance() {
+  G.avance.clearLayers();
+  if (!S.eje || !conMetrados()) return;
+  for (const m of S.metrados) {
+    if (m.estado === 'ANULADO' || m.ini == null) continue;
+    const color = COLOR_GRUPO[grupoDe(m.partida)] || '#6a1b9a', ok = cuenta(m);
+    for (const off of { LI: [-6], LD: [6], AMBOS: [-6, 6] }[m.lado] || [0]) {
+      const capa = m.fin != null && m.fin - m.ini > 1
+        ? L.polyline(S.eje.tramoLatLon(m.ini, m.fin, off), { color, weight: 7, opacity: ok ? .9 : .7, dashArray: ok ? null : '8 6' })
+        : L.circleMarker(S.eje.puntoLatLon(m.ini, off), { radius: 7, color: '#fff', weight: 2, fillColor: color, fillOpacity: ok ? .95 : .6 });
+      // al tocar: todos los metrados de ese punto (las líneas se pueden tapar unas a otras)
+      capa.bindTooltip(`${esc(m.partida)} · ${esc(fmtCant(m.cantidad, m.und))}${ok ? '' : ' · por verificar'}`)
+        .on('click', (e) => metradosAqui(ubicarLatLon(e.latlng.lat, e.latlng.lng).prog)).addTo(G.avance);
+    }
+  }
+}
+
+function metradosAqui(prog) {
+  const lst = metradosEn(prog);
+  if (lst.length === 1) return verMetrado(lst[0].id);
+  const c = hoja(`Metrados en Km ${fmtProg(prog)}`, `${lst.map(itemMetrado).join('') || '<p class="ayuda">Ningún metrado en este punto.</p>'}
+    <button class="btn" id="ma-ficha" style="width:100%;margin-top:8px">Ficha de la progresiva</button>`);
+  c.querySelectorAll('[data-m]').forEach((b) => b.onclick = () => verMetrado(b.dataset.m, () => metradosAqui(prog)));
+  c.querySelector('#ma-ficha').onclick = () => fichaProgresiva(prog);
+  S.refrescarMet = () => metradosAqui(prog);
+}
+
+const metradosEn = (prog) => S.metrados.filter((m) => m.estado !== 'ANULADO' && m.ini != null && prog >= m.ini - 10 && prog <= (m.fin ?? m.ini) + 10);
+
+function itemMetrado(m) {
+  const p = partidaDe(m.partida);
+  return `<button class="item ${m.estado === 'ANULADO' ? 'anulado' : ''}" data-m="${esc(m.id)}"><span class="crece"><span class="t">${esc(m.partida)} · ${esc(cortar(p?.desc || '', 48))}</span><br>
+    <span class="s">${esc(ubicMet(m))} · ${esc(fechaDia(m.fecha))}${m.registradoPor ? ' · ' + esc(m.registradoPor) : ''}${m.fotos?.length || m.fotosLocal?.length ? ' · 📷' : ''}</span></span>
+    <span class="der"><b>${esc(fmtCant(m.cantidad, m.und))}</b><br>${etqMet(m)}</span></button>`;
+}
+
+function filaPartida(p, a = { ver: 0, pend: 0, obs: 0, n: 0 }) {
+  const pc = p.contrato ? 100 * a.ver / p.contrato : 0, pp = p.contrato ? 100 * (a.pend + a.obs) / p.contrato : 0;
+  const pasa = p.contrato != null && a.ver > p.contrato + 1e-9;
+  return `<button class="item partida" data-p="${esc(p.item)}"><span class="crece"><span class="t">${esc(p.item)} · ${esc(cortar(p.desc, 70))}</span><br>
+    <span class="s">Contrato ${esc(fmtCant(p.contrato, p.und))} · <b class="${pasa ? 'rojo' : ''}">ejecutado ${esc(fmtCant(a.ver))} (${fmtPct(pc)})</b>${a.pend + a.obs ? ` · ${esc(fmtCant(a.pend + a.obs))} por verificar` : ''}</span>
+    <span class="barra-av"><i style="width:${Math.min(pc, 100)}%"></i><i class="pend" style="width:${Math.max(0, Math.min(pp, 100 - Math.min(pc, 100)))}%"></i></span></span></button>`;
+}
+
+// Secciones del tramo de la fuente que más lo cubre (control, línea base, replanteo, expediente)
+const PREFERENCIA_FUENTE = ['CONTROL', 'LINEA_BASE', 'REPLANTEO', 'EXPEDIENTE', 'OTRO'];
+function seccionesTramo(ini, fin) {
+  let mejor = null;
+  for (const fuente of PREFERENCIA_FUENTE) {
+    const secs = [];
+    for (const j of S.secJuegos) {
+      const g = S.secCache[j.clave];
+      if (j.fuente === fuente && g && j.fin >= ini - 200 && j.ini <= fin + 200) secs.push(...g.secciones.filter((s) => s.p >= ini - 200 && s.p <= fin + 200));
+    }
+    if (secs.length < 2) continue;
+    secs.sort((a, b) => a.p - b.p);
+    let cubre = 0;
+    for (let i = 0; i + 1 < secs.length; i++) { const d = secs[i + 1].p - secs[i].p; if (d > 0 && d <= 200) cubre += Math.max(0, Math.min(secs[i + 1].p, fin) - Math.max(secs[i].p, ini)); }
+    if (!mejor || cubre > mejor.cubre + 1) mejor = { fuente, nombre: nombreFuente(fuente), secs, cubre };
+  }
+  return mejor;
+}
+
+function pantallaMetrados(vista = 'partidas') {
+  if (!conMetrados()) return;
+  const av = avance(S.metrados);
+  const nVer = S.metrados.filter(porVerificar).length, nObs = S.metrados.filter((m) => m.estado === 'OBSERVADO').length;
+  const vistas = [['partidas', 'Por partida'], ['registros', 'Registros'], ...(verificador() ? [['verificar', `Por verificar (${nVer})`]] : []), ['observados', `Observados (${nObs})`]];
+  const c = hoja('Metrados ejecutados', `
+    <div class="fila"><button class="btn primario crece" id="m-nuevo">＋ Registrar metrado</button><button class="btn" id="m-exp">Exportar</button></div>
+    <div class="chips" id="m-vista" style="margin-top:10px">${vistas.map(([k, t]) => `<button data-v="${k}" class="${k === vista ? 'sel' : ''}">${t}</button>`).join('')}</div>
+    <input id="m-txt" type="search" placeholder="Buscar ítem, descripción o persona" style="margin-top:8px">
+    ${vista === 'partidas' ? '<label class="ayuda marca"><input type="checkbox" id="m-con"> Solo partidas con metrados</label>' : ''}
+    <div id="m-lista" style="margin-top:8px"></div>
+    <p class="ayuda">Solo lo <b>verificado</b> suma al avance. ${verificador() ? 'Tú verificas u observas lo que registra el equipo.' : 'Acceso total o el administrador verifican lo que registras.'}</p>`);
+  const pintar = () => {
+    const q = c.querySelector('#m-txt').value.trim();
+    const busca = (t) => !q || coincide(q, t);
+    let html = '';
+    if (vista === 'partidas') {
+      const solo = c.querySelector('#m-con').checked;
+      let grupo = '';
+      for (const p of S.partidas) {
+        if (p.titulo || (solo && !av[p.item]) || !busca(p.item + ' ' + p.desc)) continue;
+        const g = grupoDe(p.item);
+        if (g !== grupo) { grupo = g; html += `<h3 class="grupo-met">${esc(g)} · ${esc(partidaDe(g)?.desc || '')}</h3>`; }
+        html += filaPartida(p, av[p.item]);
+      }
+      html ||= '<p class="ayuda">Ninguna partida con ese filtro.</p>';
+    } else {
+      const filtro = { registros: () => true, verificar: porVerificar, observados: (m) => m.estado === 'OBSERVADO' }[vista];
+      const lst = S.metrados.filter((m) => filtro(m) && busca(`${m.partida} ${partidaDe(m.partida)?.desc || ''} ${m.registradoPor || ''}`));
+      html = lst.slice(0, 300).map(itemMetrado).join('') || '<p class="ayuda">No hay registros con ese filtro.</p>';
+    }
+    const l = c.querySelector('#m-lista');
+    l.innerHTML = html;
+    l.querySelectorAll('[data-p]').forEach((b) => b.onclick = () => pantallaPartida(b.dataset.p, () => pantallaMetrados(vista)));
+    l.querySelectorAll('[data-m]').forEach((b) => b.onclick = () => verMetrado(b.dataset.m, () => pantallaMetrados(vista)));
+  };
+  c.querySelector('#m-txt').oninput = pintar;
+  c.querySelector('#m-con')?.addEventListener('change', pintar);
+  c.querySelectorAll('#m-vista [data-v]').forEach((b) => b.onclick = () => pantallaMetrados(b.dataset.v));
+  c.querySelector('#m-nuevo').onclick = () => {
+    const m = mapa.getCenter(), u = S.enVia && S.u ? S.u : ubicarLatLon(m.lat, m.lng);
+    editarMetrado(null, { ini: u.dist < 500 ? Math.round(u.prog) : null, volver: () => pantallaMetrados(vista) });
+  };
+  c.querySelector('#m-exp').onclick = exportarMetrados;
+  pintar();
+  S.refrescarMet = () => pantallaMetrados(vista);
+}
+
+// Franja de la vía (0+000 al final) con lo metrado de la partida
+function tiraAvance(lst) {
+  const a = S.eje.inicio, b = S.eje.fin, x = (p) => (100 * (p - a)) / (b - a);
+  const barras = lst.filter((m) => m.estado !== 'ANULADO' && m.ini != null).map((m) => {
+    const x0 = x(m.ini), w = Math.max(x(m.fin ?? m.ini) - x0, 0.25), medio = m.lado === 'LI' || m.lado === 'LD';
+    return `<rect x="${x0.toFixed(2)}" y="${m.lado === 'LD' ? 10 : 0}" width="${w.toFixed(2)}" height="${medio ? 10 : 20}" fill="${cuenta(m) ? '#2e7d32' : m.estado === 'OBSERVADO' ? '#c62828' : '#f9a825'}"/>`;
+  }).join('');
+  const marcas = [];
+  for (let k = Math.ceil(a / 5000) * 5000; k <= b; k += 5000) marcas.push(`<line x1="${x(k).toFixed(2)}" x2="${x(k).toFixed(2)}" y1="0" y2="20" stroke="#90a4ae" stroke-width=".15"/>`);
+  return `<div class="tira-av"><svg viewBox="0 0 100 20" preserveAspectRatio="none"><rect width="100" height="20" fill="#eceff1"/>${marcas.join('')}${barras}</svg>
+    <div class="tira-pie"><span>${fmtProg(a)}</span><span><i class="v"></i>verificado <i class="p"></i>por verificar</span><span>${fmtProg(b)}</span></div></div>`;
+}
+
+function pantallaPartida(item, volver = null) {
+  const p = partidaDe(item);
+  if (!p) return;
+  const a = avance(S.metrados)[item] || { ver: 0, pend: 0, obs: 0, n: 0 };
+  const lst = S.metrados.filter((m) => m.partida === item);
+  const pc = p.contrato ? 100 * a.ver / p.contrato : 0, pasa = p.contrato != null && a.ver > p.contrato + 1e-9;
+  const c = hoja(`Partida ${item}`, `
+    ${volver ? '<button class="btn volver" id="pp-volver">‹ Volver</button>' : ''}
+    <p><b>${esc(p.desc)}</b></p>
+    <table class="tabla">
+      <tr><td>Metrado del contrato</td><td>${esc(fmtCant(p.contrato, p.und))}</td></tr>
+      <tr><td>Ejecutado (verificado)</td><td><b class="${pasa ? 'rojo' : ''}">${esc(fmtCant(a.ver, p.und))}</b> · ${fmtPct(pc)}</td></tr>
+      <tr><td>Por verificar</td><td>${esc(fmtCant(a.pend, p.und))}</td></tr>
+      ${a.obs ? `<tr><td>Observado</td><td>${esc(fmtCant(a.obs, p.und))}</td></tr>` : ''}
+      <tr><td>Saldo</td><td>${p.contrato != null ? esc(fmtCant(p.contrato - a.ver, p.und)) : '—'}</td></tr>
+    </table>
+    ${pasa ? '<p class="aviso-linea">Lo verificado supera el metrado del contrato: el exceso necesita el trámite de mayores metrados antes de valorizarse.</p>' : ''}
+    ${S.eje && lst.some((m) => m.ini != null) ? tiraAvance(lst) : ''}
+    ${p.criterio ? `<p class="ayuda"><b>Cómo se mide:</b> ${esc(p.criterio)}</p>` : ''}
+    ${p.obs ? `<p class="aviso-linea">${esc(p.obs)}</p>` : ''}
+    <button class="btn primario" id="pp-nuevo" style="width:100%;margin:8px 0">＋ Registrar metrado de esta partida</button>
+    <h3 class="ficha-t">Registros (${lst.length})</h3>
+    ${lst.map(itemMetrado).join('') || '<p class="ayuda">Todavía no hay metrados de esta partida.</p>'}`);
+  const aqui = () => pantallaPartida(item, volver);
+  c.querySelector('#pp-volver')?.addEventListener('click', volver);
+  c.querySelector('#pp-nuevo').onclick = () => {
+    const m = mapa.getCenter(), u = S.enVia && S.u ? S.u : ubicarLatLon(m.lat, m.lng);
+    editarMetrado(null, { partida: item, ini: u.dist < 500 ? Math.round(u.prog) : null, volver: aqui });
+  };
+  c.querySelectorAll('[data-m]').forEach((b) => b.onclick = () => verMetrado(b.dataset.m, aqui));
+  S.refrescarMet = aqui;
+}
+
+function verMetrado(id, volver = null) {
+  const m = S.metrados.find((x) => x.id === id);
+  if (!m) return mostrarAviso('No se encontró el metrado');
+  const p = partidaDe(m.partida), ver = verificador();
+  const fotos = [...(m.fotosLocal || []), ...(m.fotos || []).map((url) => ({ url }))];
+  const acc = {
+    verificar: ver && ['REGISTRADO', 'OBSERVADO'].includes(m.estado), observar: ver && ['REGISTRADO', 'VERIFICADO'].includes(m.estado),
+    reabrir: ver && m.estado === 'VERIFICADO', restaurar: ver && m.estado === 'ANULADO', editar: puedeEditarMet(m), anular: puedeAnularMet(m),
+  };
+  const conNota = acc.observar || acc.reabrir || acc.restaurar || acc.anular;
+  const c = hoja('Metrado', `
+    ${volver ? '<button class="btn volver" id="vm-volver">‹ Volver</button>' : ''}
+    <p><b>${esc(m.partida)}</b> · ${esc(p?.desc || '')}</p>
+    <p>${etqMet(m)}</p>
+    <table class="tabla">
+      <tr><td>Cantidad</td><td><b>${esc(fmtCant(m.cantidad, m.und || p?.und))}</b></td></tr>
+      <tr><td>Fecha de ejecución</td><td>${esc(fechaDia(m.fecha))}</td></tr>
+      <tr><td>Ubicación</td><td style="white-space:normal">${esc(ubicMet(m))}</td></tr>
+      ${m.calculo ? `<tr><td>Cálculo</td><td style="white-space:normal">${esc(m.calculo)}</td></tr>` : ''}
+      ${m.sustento ? `<tr><td>Sustento</td><td style="white-space:normal">${esc(m.sustento)}</td></tr>` : ''}
+      ${m.asiento ? `<tr><td>Cuaderno de obra</td><td style="white-space:normal">${esc(m.asiento)}</td></tr>` : ''}
+      ${m.elemento ? `<tr><td>Elemento</td><td>${esc(m.elemento)}</td></tr>` : ''}
+      ${m.frente ? `<tr><td>Frente</td><td style="white-space:normal">${esc(m.frente)}</td></tr>` : ''}
+      ${m.valorizacion ? `<tr><td>Valorización</td><td>N° ${esc(m.valorizacion)}</td></tr>` : ''}
+    </table>
+    ${m.obs ? `<p class="ayuda">${esc(m.obs)}</p>` : ''}
+    ${m.nota ? `<p class="aviso-linea"><b>${{ OBSERVADO: 'Observación', ANULADO: 'Motivo de la anulación', REGISTRADO: 'Motivo' }[m.estado] || 'Nota'}${m.revisadoPor && m.estado !== 'ANULADO' ? ' de ' + esc(m.revisadoPor) : ''}:</b> ${esc(m.nota)}</p>` : ''}
+    ${fotos.length ? `<div class="fotos">${fotos.map((f, i) => `<div>${f.mini ? `<img src="${f.mini}" alt="Foto ${i + 1}" data-v="${i}">` : `<a href="#" data-v="${i}">📷 Foto ${i + 1}</a>`}</div>`).join('')}</div>` : ''}
+    <p class="ayuda">Registrado por ${esc(m.registradoPor || '—')}${m.registrado ? ' el ' + fechaCorta(m.registrado) : ''}${m.revisadoPor ? ` · revisado por ${esc(m.revisadoPor)}${m.revisado ? ' el ' + fechaCorta(m.revisado) : ''}` : ''}</p>
+    ${conNota ? `<label class="campo" for="vm-nota">${ver ? 'Nota de revisión o motivo' : 'Motivo (para anular)'}</label>
+      <textarea id="vm-nota" placeholder="${ver ? 'Qué se observa, o por qué se reabre o anula' : 'Por qué se anula'}"></textarea>` : ''}
+    ${acc.verificar || acc.observar ? `<div class="botones">${acc.observar ? '<button class="btn peligro" data-e="OBSERVADO">⚠ Observar</button>' : ''}${acc.verificar ? '<button class="btn primario" data-e="VERIFICADO">✔ Verificar</button>' : ''}</div>` : ''}
+    <div class="fila" style="margin-top:8px;flex-wrap:wrap">
+      ${acc.editar ? '<button class="btn crece" id="vm-editar">✎ Corregir</button>' : ''}
+      ${acc.reabrir ? '<button class="btn crece" data-e="REGISTRADO">↺ Reabrir</button>' : ''}
+      ${acc.restaurar ? '<button class="btn crece" data-e="REGISTRADO">↺ Restaurar</button>' : ''}
+      ${m.ini != null ? '<button class="btn crece" id="vm-mapa">Ver en el mapa</button>' : ''}
+      ${proyActual()?.url ? '<button class="btn crece" id="vm-hist">🕘 Historial</button>' : ''}
+    </div>
+    ${acc.anular ? '<button class="btn peligro" data-e="ANULADO" style="width:100%;margin-top:8px">Anular registro</button>' : ''}`);
+  const aqui = () => verMetrado(id, volver);
+  c.querySelector('#vm-volver')?.addEventListener('click', volver);
+  c.querySelectorAll('.fotos [data-v]').forEach((im) => im.onclick = (ev) => { ev.preventDefault(); verFoto(fotos[+im.dataset.v]); });
+  c.querySelector('#vm-editar')?.addEventListener('click', () => editarMetrado(m, { volver: aqui }));
+  c.querySelector('#vm-hist')?.addEventListener('click', () => verHistorialMet(m, aqui));
+  c.querySelector('#vm-mapa')?.addEventListener('click', () => {
+    cerrarHoja(); setSeguir(false); G.avance.addTo(mapa);
+    mapa.fitBounds(L.latLngBounds(m.fin != null && m.fin - m.ini > 1 ? S.eje.tramoLatLon(m.ini, m.fin, 0) : [S.eje.puntoLatLon(m.ini)]), { maxZoom: 17, padding: [40, 40] });
+  });
+  c.querySelectorAll('[data-e]').forEach((b) => b.onclick = async () => {
+    const estado = b.dataset.e, nota = c.querySelector('#vm-nota')?.value.trim() || '';
+    const exige = estado === 'OBSERVADO' || estado === 'ANULADO' || (estado === 'REGISTRADO' && m.estado !== 'OBSERVADO');
+    if (exige && !nota) { c.querySelector('#vm-nota')?.focus(); return mostrarAviso(estado === 'OBSERVADO' ? 'Escribe qué se observa' : 'Escribe el motivo'); }
+    if (estado === 'ANULADO' && !confirm('¿Anular este metrado? Deja de contar en el avance; queda en el historial.')) return;
+    await guardarOpMet({ op: 'estado', id: m.id, estado, nota });
+    aqui();
+  });
+  S.refrescarMet = aqui;
+}
+
+async function verHistorialMet(m, volver) {
+  const c = hoja('Historial del metrado', '<p class="ayuda">Cargando…</p>');
+  const pie = '<button class="btn volver" id="hm-volver">‹ Volver</button>';
+  if (!navigator.onLine) { c.innerHTML = pie + '<p class="ayuda">Necesitas internet para ver el historial guardado en el servidor.</p>'; }
+  else {
+    try {
+      const { cambios } = await A().llamar('metrado_historial', { id: m.id });
+      c.innerHTML = pie + (cambios.map((h) => `<div class="hist"><b>${esc(ACCION_MET[h.accion] || h.accion)}</b> · ${fechaCorta(h.fecha)} · ${esc(h.nombre)}
+        ${h.antes ? `<div class="s">Antes: ${esc(h.antes)}</div>` : ''}<div class="s">${h.antes ? 'Después: ' : ''}${esc(h.despues)}</div>
+        ${h.nota ? `<div>${h.accion === 'OBSERVADO' ? 'Observación' : 'Motivo'}: ${esc(h.nota)}</div>` : ''}</div>`).join('') || '<p class="ayuda">Sin cambios registrados.</p>');
+    } catch (er) {
+      if (await manejarAcceso(er)) return;
+      c.innerHTML = pie + '<p class="ayuda">No se pudo cargar el historial: ' + esc(er.message) + '</p>';
+    }
+  }
+  c.querySelector('#hm-volver').onclick = volver;
+}
+
+// Registrar o corregir un metrado. f trae el formulario a medio llenar al volver de elegir un punto en el mapa.
+function editarMetrado(m = null, pre = {}, f = null) {
+  if (!conMetrados()) return mostrarAviso('Tu rol no permite registrar metrados. Pídelo al administrador.');
+  const hoy = hoyLocal();
+  f = f || {
+    id: m?.id || 'M-' + uid(), partida: m?.partida || pre.partida || '', fecha: m?.fecha || hoy,
+    ini: m?.ini ?? pre.ini ?? null, fin: m?.fin ?? null, lado: m?.lado ?? '', cantidad: m ? String(m.cantidad) : '', pct: 100,
+    calculo: m?.calculo || '', elemento: m?.elemento || '', frente: m?.frente || '', sustento: m?.sustento || '', asiento: m?.asiento || '',
+    obs: m?.obs || '', fotos: [], motivo: '', buscar: '', eligiendo: !(m?.partida || pre.partida),
+  };
+  const conMotivo = m?.estado === 'VERIFICADO';
+  const cerca = S.elementos.filter((e) => f.ini != null && e.ini <= (f.fin ?? f.ini) + 50 && (e.fin ?? e.ini) >= f.ini - 50);
+  if (f.elemento && !cerca.some((e) => e.codigo === f.elemento)) { const e = S.elementos.find((x) => x.codigo === f.elemento); if (e) cerca.unshift(e); }
+  const c = hoja(m ? 'Corregir metrado' : 'Registrar metrado', `
+    <label class="campo">Partida</label><div id="em-part"></div>
+    <label class="campo" for="em-fecha">Fecha de ejecución</label><input id="em-fecha" type="date" value="${esc(f.fecha)}" max="${hoy}">
+    <label class="campo">Tramo</label>
+    <div class="fila"><div class="crece"><span class="ayuda">Progresiva de inicio</span><input id="em-ini" type="text" inputmode="decimal" placeholder="—" value="${f.ini != null ? fmtProg(f.ini, 1) : ''}"></div>
+      <div class="crece"><span class="ayuda">Progresiva de fin</span><input id="em-fin" type="text" inputmode="decimal" placeholder="—" value="${f.fin != null ? fmtProg(f.fin, 1) : ''}"></div></div>
+    <div class="fila" style="margin-top:6px"><span class="ayuda" style="width:46px">Inicio</span><button class="btn crece" data-u="gps-ini">📍 Mi GPS</button><button class="btn crece" data-u="mapa-ini">✛ Mapa</button></div>
+    <div class="fila" style="margin-top:6px"><span class="ayuda" style="width:46px">Fin</span><button class="btn crece" data-u="gps-fin">📍 Mi GPS</button><button class="btn crece" data-u="mapa-fin">✛ Mapa</button></div>
+    <p class="ayuda">Las partidas globales (campamento, movilización, monitoreos…) pueden ir sin tramo.</p>
+    <label class="campo">Lado</label>
+    <div class="chips" id="em-lado">${LADOS_MET.map(([k, t]) => `<button data-l="${k}" class="${f.lado === k ? 'sel' : ''}">${t}</button>`).join('')}</div>
+    <label class="campo" for="em-cant">Cantidad ejecutada <span id="em-und"></span></label>
+    <div class="fila"><input id="em-cant" class="crece" type="text" inputmode="decimal" value="${esc(f.cantidad)}"><button class="btn" id="em-calc">Calcular</button></div>
+    <div id="em-pct-caja" class="oculto"><label class="campo" for="em-pct">% de este material en el corte (clasificación en campo)</label><input id="em-pct" type="text" inputmode="decimal" value="${esc(f.pct)}"></div>
+    <div id="em-calc-res"></div>
+    <label class="campo" for="em-calctxt">Cómo se obtuvo</label><input id="em-calctxt" type="text" value="${esc(f.calculo)}" placeholder="Ej.: medición conjunta, L = 250 m">
+    <label class="campo" for="em-sus">Protocolo o documento de sustento</label><input id="em-sus" type="text" value="${esc(f.sustento)}" placeholder="Protocolo N°, planilla, acta…">
+    <label class="campo" for="em-asi">Asiento del cuaderno de obra</label><input id="em-asi" type="text" value="${esc(f.asiento)}" placeholder="Asiento N°">
+    <label class="campo" for="em-elem">Elemento relacionado</label>
+    <select id="em-elem"><option value="">— Ninguno —</option>${cerca.map((e) => `<option value="${esc(e.codigo)}" ${e.codigo === f.elemento ? 'selected' : ''}>${esc(e.codigo)} · ${esc(e.desc)} (${fmtProg(e.ini)})</option>`).join('')}</select>
+    <label class="campo" for="em-fre">Frente de trabajo</label><input id="em-fre" type="text" value="${esc(f.frente)}">
+    <label class="campo">Fotos de sustento</label>
+    <div class="fila"><button class="btn primario crece" id="em-cam">📷 Cámara con sello</button>
+      <label class="btn crece" style="display:flex;align-items:center;justify-content:center">🖼 Galería<input id="em-gal" type="file" accept="image/*" multiple hidden></label></div>
+    <div class="fotos" id="em-fotos"></div>
+    <label class="campo" for="em-obs">Nota</label><textarea id="em-obs">${esc(f.obs)}</textarea>
+    ${conMotivo ? `<label class="campo" for="em-mot">Motivo del cambio <span style="color:var(--mal)">*</span></label><textarea id="em-mot" placeholder="Ya estaba verificado: explica la corrección">${esc(f.motivo)}</textarea>` : ''}
+    <p class="ayuda">${m ? 'La corrección queda en el historial del metrado.' : 'Queda «por verificar» hasta que Acceso total o el administrador lo verifique.'} El metrado que vale es el medido en campo; «Calcular» solo propone un valor con las secciones.</p>
+    <div class="botones"><button class="btn" id="em-cancel">Cancelar</button><button class="btn primario" id="em-ok">Guardar</button></div>`);
+
+  const leer = () => {
+    const ini = c.querySelector('#em-ini').value.trim(), fin = c.querySelector('#em-fin').value.trim();
+    f.ini = ini ? parseProg(ini) ?? f.ini : null;
+    f.fin = fin ? parseProg(fin) ?? f.fin : null;
+    f.fecha = c.querySelector('#em-fecha').value;
+    f.cantidad = c.querySelector('#em-cant').value.trim();
+    f.pct = numONull(c.querySelector('#em-pct').value.replace(',', '.')) ?? 100;
+    f.calculo = c.querySelector('#em-calctxt').value.trim();
+    f.sustento = c.querySelector('#em-sus').value.trim();
+    f.asiento = c.querySelector('#em-asi').value.trim();
+    f.elemento = c.querySelector('#em-elem').value;
+    f.frente = c.querySelector('#em-fre').value.trim();
+    f.obs = c.querySelector('#em-obs').value.trim();
+    f.motivo = c.querySelector('#em-mot')?.value.trim() || '';
+  };
+  const pintarUnd = () => {
+    const p = partidaDe(f.partida);
+    c.querySelector('#em-und').textContent = p ? `(${p.und})` : '';
+    c.querySelector('#em-calc').classList.toggle('oculto', !p?.calculo);
+    c.querySelector('#em-pct-caja').classList.toggle('oculto', p?.calculo !== 'CORTE');
+  };
+  const pintarPartida = () => {
+    const box = c.querySelector('#em-part'), p = partidaDe(f.partida);
+    if (p && !f.eligiendo) {
+      box.innerHTML = `<div class="caja"><b>${esc(p.item)}</b> · ${esc(p.desc)}<br><span class="ayuda">Contrato ${esc(fmtCant(p.contrato, p.und))}${p.criterio ? ' · ' + esc(p.criterio) : ''}</span>
+        <button class="btn" id="em-cambiar" style="width:100%;margin-top:6px">Cambiar partida</button></div>`;
+      box.querySelector('#em-cambiar').onclick = () => { f.eligiendo = true; pintarPartida(); box.querySelector('#em-buscar').focus(); };
+      return;
+    }
+    box.innerHTML = `<input id="em-buscar" type="search" placeholder="Busca: excavación, base, cuneta, 01.03…" value="${esc(f.buscar)}"><div class="opciones" id="em-opc"></div>`;
+    const inp = box.querySelector('#em-buscar');
+    const opciones = () => {
+      f.buscar = inp.value;
+      const q = inp.value.trim();
+      const lst = S.partidas.filter((x) => !x.titulo && (!q || coincide(q, x.item + ' ' + x.desc))).slice(0, 40);
+      box.querySelector('#em-opc').innerHTML = lst.map((x) => `<button data-i="${esc(x.item)}" class="${x.item === f.partida ? 'sel' : ''}"><b>${esc(x.item)}</b> ${esc(cortar(x.desc, 70))} <span class="s">(${esc(x.und)})</span></button>`).join('')
+        || '<p class="ayuda">Ninguna partida coincide.</p>';
+      box.querySelectorAll('[data-i]').forEach((b) => b.onclick = () => { f.partida = b.dataset.i; f.eligiendo = false; pintarPartida(); pintarUnd(); });
+    };
+    inp.oninput = opciones;
+    opciones();
+  };
+  const pintarFotos = () => {
+    c.querySelector('#em-fotos').innerHTML = f.fotos.map((x, i) => `<div><img src="${x.mini}" alt="Foto ${i + 1}" data-v="${i}"><button data-i="${i}" aria-label="Quitar">✕</button></div>`).join('');
+    c.querySelectorAll('#em-fotos [data-i]').forEach((b) => b.onclick = () => { f.fotos.splice(+b.dataset.i, 1); pintarFotos(); });
+    c.querySelectorAll('#em-fotos [data-v]').forEach((im) => im.onclick = () => verFoto(f.fotos[+im.dataset.v]));
+  };
+  pintarPartida(); pintarUnd(); pintarFotos();
+
+  c.querySelectorAll('#em-lado button').forEach((b) => b.onclick = () => {
+    f.lado = b.dataset.l; c.querySelectorAll('#em-lado button').forEach((x) => x.classList.toggle('sel', x === b));
+  });
+  const ponerUbic = (cual, u) => {
+    const p = Math.round(u.prog * 10) / 10;
+    if (cual === 'ini') { f.ini = p; c.querySelector('#em-ini').value = fmtProg(p, 1); } else { f.fin = p; c.querySelector('#em-fin').value = fmtProg(p, 1); }
+  };
+  c.querySelectorAll('[data-u]').forEach((b) => b.onclick = () => {
+    const [como, cual] = b.dataset.u.split('-');
+    leer();
+    if (como === 'mapa') {
+      cerrarHoja();
+      return elegirEnMapa(`Pon la mira + en el ${cual === 'ini' ? 'inicio' : 'fin'} del tramo ejecutado`, (u) => {
+        if (u) { const p = Math.round(u.prog * 10) / 10; if (cual === 'ini') f.ini = p; else f.fin = p; }
+        editarMetrado(m, pre, f);
+      }, cual === 'fin' ? f.fin ?? f.ini : f.ini);
+    }
+    if (S.pos && !S.pos.simulada && Date.now() - S.pos.t < 15000 && S.u) return ponerUbic(cual, S.u);
+    mostrarAviso('Buscando tu posición GPS…', 'info');
+    navigator.geolocation.getCurrentPosition((g) => {
+      $('#aviso').classList.add('oculto');
+      const u = ubicarLatLon(g.coords.latitude, g.coords.longitude);
+      if (u.dist > 200) return mostrarAviso(`Estás a ${Math.round(u.dist)} m del eje: acércate al tramo`);
+      ponerUbic(cual, u);
+    }, () => mostrarAviso('No se pudo obtener la posición GPS'), { enableHighAccuracy: true, timeout: 20000 });
+  });
+
+  c.querySelector('#em-calc').onclick = () => {
+    leer();
+    const p = partidaDe(f.partida), caja = c.querySelector('#em-calc-res');
+    if (!p) return mostrarAviso('Elige primero la partida');
+    const r = calcular(p.calculo, {
+      ini: f.ini, fin: f.fin, lado: f.lado, pct: f.pct, tipica: f.ini != null ? seccionEn(S.secciones, f.ini) : null,
+      secc: f.ini != null && f.fin != null && f.fin > f.ini ? seccionesTramo(f.ini, f.fin) : null,
+    });
+    if (r.error) { caja.innerHTML = `<p class="aviso-linea">${esc(r.error)}</p>`; return; }
+    const d = r.und === 'ha' || r.und === 'km' ? 1e4 : 100, v = Math.round(r.valor * d) / d;
+    c.querySelector('#em-cant').value = String(v);
+    c.querySelector('#em-calctxt').value = r.detalle;
+    caja.innerHTML = `<p class="ayuda">Propuesto: <b>${esc(fmtCant(v, r.und))}</b> · ${esc(r.detalle)}</p>
+      ${r.und !== p.und ? `<p class="aviso-linea">Ojo: la partida se mide en ${esc(p.und)} y el cálculo da ${esc(r.und)}.</p>` : ''}
+      ${r.aviso ? `<p class="aviso-linea">${esc(r.aviso)}</p>` : ''}<p class="ayuda">Compáralo con lo medido en campo antes de guardar.</p>`;
+  };
+
+  c.querySelector('#em-cam').onclick = () => abrirCamara({
+    lineas: lineasSello,
+    contexto: () => (S.pos && Date.now() - S.pos.t < 20000 ? { lat: S.pos.lat, lon: S.pos.lon, eje: S.ejeLL } : null),
+    opciones: { logo: S.ajustes.fotoLogo ? logoFotos() : null, mapa: S.ajustes.fotoMapa, brujula: S.ajustes.fotoBrujula, estilo: S.ajustes.estiloFoto },
+    alFoto: (x) => { f.fotos.push({ id: uid(), nombre: `metrado_${f.partida || 'partida'}.jpg`, ...x }); },
+    alCerrar: pintarFotos,
+  });
+  c.querySelector('#em-gal').onchange = async (e) => {
+    for (const file of e.target.files) {
+      mostrarAviso('Procesando foto…', 'info');
+      const [datos, mini] = await Promise.all([reducir(file), reducir(file, 320, .7)]);
+      f.fotos.push({ id: uid(), nombre: file.name || 'foto.jpg', datos, mini });
+    }
+    e.target.value = '';
+    $('#aviso').classList.add('oculto');
+    pintarFotos();
+  };
+  c.querySelector('#em-cancel').onclick = () => (pre.volver ? pre.volver() : cerrarHoja());
+
+  c.querySelector('#em-ok').onclick = async () => {
+    leer();
+    const p = partidaDe(f.partida);
+    if (!p) return mostrarAviso('Elige la partida');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(f.fecha)) return mostrarAviso('Escribe la fecha de ejecución');
+    if (f.fecha > hoy) return mostrarAviso('La fecha de ejecución no puede ser posterior a hoy');
+    if (f.fin != null && f.ini == null) return mostrarAviso('Falta la progresiva de inicio');
+    if (f.ini != null && S.eje && (f.ini < S.eje.inicio - 50 || (f.fin ?? f.ini) > S.eje.fin + 50)) return mostrarAviso(`El tramo está fuera de la vía (${fmtProg(S.eje.inicio)} a ${fmtProg(S.eje.fin)})`);
+    if (f.ini != null && f.fin != null && f.fin < f.ini) [f.ini, f.fin] = [f.fin, f.ini];
+    if (f.fin != null && igualProg(f.fin, f.ini)) f.fin = null;
+    const cant = numONull(String(f.cantidad).replace(',', '.'));
+    if (cant == null || cant === 0) { c.querySelector('#em-cant').focus(); return mostrarAviso('Escribe la cantidad ejecutada'); }
+    if (cant < 0 && !verificador()) return mostrarAviso('Un ajuste negativo solo lo registra Acceso total o el administrador');
+    if (conMotivo && !f.motivo) { c.querySelector('#em-mot').focus(); return mostrarAviso('Escribe el motivo del cambio'); }
+    // aviso si con esto la partida pasa el metrado del contrato
+    const a = avance(S.metrados)[p.item] || { ver: 0, pend: 0, obs: 0 };
+    const otros = a.ver + a.pend + a.obs - (m && m.partida === p.item && m.estado !== 'ANULADO' ? m.cantidad : 0);
+    if (p.contrato != null && otros + cant > p.contrato + 1e-6
+      && !confirm(`Con este registro, ${p.item} llega a ${fmtCant(otros + cant, p.und)}: más que el metrado del contrato (${fmtCant(p.contrato, p.und)}).\n\nEl exceso necesita el trámite de mayores metrados. ¿Guardar igual?`)) return;
+    await guardarOpMet({
+      op: 'guardar', motivo: f.motivo, fotos: f.fotos,
+      m: { id: f.id, partida: p.item, fecha: f.fecha, ini: f.ini == null ? null : Math.round(f.ini * 100) / 100, fin: f.fin == null ? null : Math.round(f.fin * 100) / 100,
+        lado: f.lado, cantidad: cant, calculo: f.calculo, elemento: f.elemento, frente: f.frente, sustento: f.sustento, asiento: f.asiento, obs: f.obs },
+    });
+    verMetrado(f.id, pre.volver || null);
+  };
+}
+
+function exportarMetrados() {
+  const hoy = hoyLocal();
+  const c = hoja('Exportar metrados', `
+    <p class="ayuda">Un libro de Excel con dos hojas: <b>Resumen</b> por partida (como la hoja VALORIZACION del control de metrados: acumulado anterior, del periodo, acumulado, % y saldo) y <b>Registros</b> del periodo con su sustento.
+      Solo lo verificado cuenta como metrado del periodo; lo pendiente va en otra columna.</p>
+    <div class="fila"><div class="crece"><label class="campo" for="x-desde">Desde</label><input id="x-desde" type="date" value="${hoy.slice(0, 8)}01"></div>
+      <div class="crece"><label class="campo" for="x-hasta">Hasta</label><input id="x-hasta" type="date" value="${hoy}"></div></div>
+    <button class="btn primario" id="x-xlsx" style="width:100%;margin-top:12px">Descargar Excel (.xlsx)</button>
+    <button class="btn volver" id="x-volver" style="margin-top:12px">‹ Volver</button>`);
+  c.querySelector('#x-xlsx').onclick = async () => {
+    const d = c.querySelector('#x-desde').value || '0000-01-01', h = c.querySelector('#x-hasta').value || '9999-12-31';
+    if (d > h) return mostrarAviso('La fecha «Desde» es posterior a «Hasta»');
+    const obra = proyActual()?.nombre || 'Obra', titulo = [`${obra} · Metrados ejecutados del ${fechaDia(d)} al ${fechaDia(h)} · exportado el ${fechaCorta(new Date())}`];
+    const blob = libroXlsx([
+      { nombre: 'Resumen', filas: [titulo, [], ...filasResumen(S.partidas, S.metrados, d, h)], negrita: 3, anchos: [14, 60, 7, 15, 15, 15, 15, 10, 15, 15, 10] },
+      { nombre: 'Registros', filas: [titulo, [], ...filasDetalle(S.partidas, S.metrados, d, h, fmtProg)], negrita: 3, anchos: [11, 14, 45, 11, 11, 7, 12, 6, 13, 40, 30, 16, 12, 14, 35, 18, 18, 6, 35, 16] },
+    ]);
+    const archivo = new File([blob], `metrados_${obra.replace(/\W+/g, '_')}_${d}_a_${h}.xlsx`, { type: blob.type });
+    // en el celular se abre «Compartir» (Drive, WhatsApp, correo…); en la PC se descarga
+    if (navigator.canShare?.({ files: [archivo] }) && matchMedia('(pointer: coarse)').matches) { await navigator.share({ files: [archivo] }).catch(() => {}); return; }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(archivo); a.download = archivo.name; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  };
+  c.querySelector('#x-volver').onclick = () => pantallaMetrados();
 }
 
 // ---- láminas de planos (SVG del expediente) ----
@@ -1068,7 +1616,7 @@ function pintarEstado(extra) {
   else if (S.gpsError && !S.sim) partes.push(`<span class="mal">${esc(S.gpsError.split(':')[0])}</span>`);
   if (S.ajustes.voz && !S.audioListo && p) partes.push('<button class="chip">🔇 Toca la pantalla para activar la voz</button>');
   if (!navigator.onLine) partes.push('<span class="mal">Sin internet</span>');
-  const pend = S.obs.filter((o) => o.sync !== 'ok').length + S.elemPend.length;
+  const pend = S.obs.filter((o) => o.sync !== 'ok').length + S.elemPend.length + S.metPend.length;
   if (pend && p?.url) partes.push(`<span class="mal">${pend} por enviar</span>`);
   if (extra) partes.push(`<span class="mal">${esc(extra)}</span>`);
   $('#estado').innerHTML = partes.join(' · ');
@@ -1096,6 +1644,12 @@ function aplicarDatos(datos) {
   S.secJuegos = leerJuegosSecc(datos);
   const firmaS = S.secJuegos.map((j) => j.clave + '|' + j.actualizado).join(';');
   if (firmaS !== S.secFirma) { S.secFirma = firmaS; colaSecciones(); }
+  S.partidas = leerPartidas(datos.partidas);
+  // la capa de avance solo aparece para quien ve los metrados
+  if (conMetrados() !== !!S.capaAvance) {
+    if (conMetrados()) capas.addOverlay(G.avance, 'Avance de metrados'); else { capas.removeLayer(G.avance); G.avance.remove(); }
+    S.capaAvance = conMetrados();
+  }
   dibujarProyecto();
   if (S.eje && S.encuadrar && !S.enVia) mapa.fitBounds(L.latLngBounds(S.ejeLL), { padding: [20, 20] });
   S.encuadrar = false;
@@ -1113,12 +1667,16 @@ async function abrirProyecto(id) {
   if (p.url && S.sesion.estado !== 'AUTORIZADO' && !(await comprobarAcceso())) return;
   S.obs = await obsDB.todas(id);
   S.elemPend = (await kv.get('elem_pend:' + id)) || [];
+  S.metPend = (await kv.get('met_pend:' + id)) || [];
+  const met = await kv.get('met:' + id);
+  S.metServ = met?.lista || []; S.metVer = met?.version || '';
   // logo cargado en este celular para esta obra (tiene prioridad sobre el del proyecto)
   const ll = await kv.get('logo:' + id);
   S.logoLocal = ll ? imagenDe(ll) : null;
   S.encuadrar = true;
   const cache = await kv.get('datos:' + id);
   if (cache) aplicarDatos(cache);
+  aplicarMetrados();
   pintarEstado();
   if (p.url) await actualizarDatos(!cache);
   iniciarGPS();
@@ -1128,7 +1686,8 @@ async function abrirProyecto(id) {
 function vaciarPantalla() {
   Object.values(S.lamURL).forEach((u) => URL.revokeObjectURL(u));
   Object.assign(S, { datos: null, eje: null, ejeLL: null, elementos: [], puntos: [], secciones: [], obs: [], logo: null, logoLocal: null, pendientes: 0,
-    laminas: [], lamCache: {}, lamURL: {}, lamFirma: '', elemPend: [], secJuegos: [], secCache: {}, secFirma: '' });
+    laminas: [], lamCache: {}, lamURL: {}, lamFirma: '', elemPend: [], secJuegos: [], secCache: {}, secFirma: '',
+    partidas: [], metServ: [], metPend: [], metrados: [], metVer: '' });
   dibujarProyecto();
   $('#btn-menu').dataset.n = '';
 }
@@ -1153,6 +1712,8 @@ async function actualizarDatos(forzar = false, avisar = false) {
       aplicarDatos(d);
       if (habia) mostrarAviso('Se actualizaron el eje y los elementos del proyecto', 'info');
     } else if (avisar) mostrarAviso('Los datos ya están al día', 'info');
+    // metrados: tienen su propia versión (cambian a diario y no obligan a bajar todo el proyecto)
+    await cargarMetrados(forzar, v.versionMet);
     // láminas que no se pudieron descargar antes
     if (S.laminas.some((l) => !S.lamCache[l.clave]?.svg)) colaLaminas();
     if (S.secJuegos.some((j) => !S.secCache[j.clave])) colaSecciones();
@@ -1184,7 +1745,7 @@ async function manejarAcceso(e) {
 
 // Borra del teléfono los datos de un proyecto: datos, láminas, observaciones, sesión y logo propio
 async function borrarProyectoLocal(id, quitarDeLista = false) {
-  for (const k of ['datos:', 'laminas:', 'secc:', 'elem_pend:', 'sesion:', 'logo:']) await kv.del(k + id);
+  for (const k of ['datos:', 'laminas:', 'secc:', 'elem_pend:', 'met:', 'met_pend:', 'sesion:', 'logo:']) await kv.del(k + id);
   for (const o of await obsDB.todas(id)) await obsDB.borrar(o.id);
   if (S.actual === id) { S.sesion = null; detenerGPS(); detenerSim(false); salirDeVia(); vaciarPantalla(); }
   if (quitarDeLista) { S.proyectos = S.proyectos.filter((x) => x.id !== id); await kv.set('proyectos', S.proyectos); }
@@ -1285,8 +1846,8 @@ async function comprobarAcceso() {
 }
 
 async function cerrarSesion() {
-  const pend = S.obs.filter((o) => o.sync !== 'ok').length + S.elemPend.length;
-  const msg = pend ? `Tienes ${pend} observaciones o cambios de elementos sin enviar: se perderán.\n\n¿Cerrar sesión igual?`
+  const pend = S.obs.filter((o) => o.sync !== 'ok').length + S.elemPend.length + S.metPend.length;
+  const msg = pend ? `Tienes ${pend} observaciones, cambios de elementos o metrados sin enviar: se perderán.\n\n¿Cerrar sesión igual?`
     : 'Al cerrar sesión se borran de este teléfono los datos del proyecto (se vuelven a descargar al entrar).\n\n¿Continuar?';
   if (!confirm(msg)) return;
   cerrarHoja();
@@ -1327,6 +1888,36 @@ async function sincronizar() {
       aplicarDatos(datos);
       if (!rechazados) mostrarAviso(enviados > 1 ? `${enviados} cambios de elementos guardados` : 'Cambio del elemento guardado', 'info');
     } else if (rechazados) aplicarDatos(S.datos);
+    // metrados: registros, sus fotos (de a una, son pesadas) y cambios de estado, en el orden en que se hicieron
+    let metOk = 0, metNo = 0;
+    while (S.metPend.length) {
+      const op = S.metPend[0];
+      try {
+        if (op.op === 'estado') await A.enviar('metrado_estado', { id: op.id, estado: op.estado, nota: op.nota });
+        else {
+          if (!op.soloFotos && !op.enviado) {
+            await A.enviar('metrado_guardar', { m: op.m, motivo: op.motivo || '', fotos: [] });
+            op.enviado = true; await kv.set('met_pend:' + p.id, S.metPend);
+          }
+          while (op.fotos?.length) {
+            const f = op.fotos[0];
+            await A.enviar('metrado_guardar', { m: { id: op.m.id }, soloFotos: true, fotos: [{ id: f.id, nombre: f.nombre, datos: f.datos.split(',')[1] }] });
+            op.fotos.shift(); await kv.set('met_pend:' + p.id, S.metPend);
+          }
+        }
+        metOk++;
+      } catch (e) {
+        if (!(e instanceof ErrorServidor) || ['SESION', 'PENDIENTE', 'REVOCADO', 'ACTUALIZAR'].includes(e.codigo)) throw e;
+        metNo++;
+        mostrarAviso(`No se guardó el metrado: ${e.message}`);
+      }
+      S.metPend.shift();
+      await kv.set('met_pend:' + p.id, S.metPend);
+    }
+    if (metOk || metNo) {
+      await cargarMetrados(true);
+      if (!metNo) mostrarAviso(metOk > 1 ? `${metOk} cambios de metrados guardados` : 'Metrado guardado', 'info');
+    }
     for (const o of S.obs.filter((x) => x.sync !== 'ok')) {
       const { fotos: _, ...resto } = o;
       const obs = { ...resto, fotos: undefined };
@@ -1362,6 +1953,7 @@ async function sincronizar() {
 
 // ================= hoja inferior (pantallas) =================
 function hoja(titulo, html, alCerrar) {
+  S.refrescarMet = null; // cada pantalla de metrados vuelve a ponerlo
   $('#hoja-titulo').textContent = titulo;
   const c = $('#hoja-cuerpo');
   c.innerHTML = html; c.scrollTop = 0;
@@ -1387,6 +1979,7 @@ function menu() {
     <button data-a="buscar"><span class="ic">🔎</span>Ir a una progresiva</button>
     <button data-a="ficha"><span class="ic">📋</span>Ficha de esta progresiva<span class="nota">sección y paquete</span></button>
     <button data-a="puntos"><span class="ic">📍</span>Puntos de control<span class="nota">${S.puntos.length}</span></button>
+    ${conMetrados() ? `<button data-a="met"><span class="ic">📏</span>Metrados ejecutados<span class="nota">${notaMenuMetrados()}</span></button>` : ''}
     ${puede('tecnico') && S.secJuegos.length ? '<button data-a="vol"><span class="ic">📐</span>Volúmenes por tramo<span class="nota">según secciones</span></button>' : ''}
     <button data-a="elementos"><span class="ic">🧱</span>Elementos de obra<span class="nota">${S.elementos.length}</span></button>
     <button data-a="obs"><span class="ic">📝</span>Observaciones<span class="nota">${S.obs.filter((o) => o.estado !== 'ANULADA').length}${pend ? ` · ${pend} por enviar` : ''}</span></button>
@@ -1404,7 +1997,7 @@ function menu() {
     gps: () => { cerrarHoja(); pausarGPS(!S.pausado); },
     actualizar: () => { cerrarHoja(); actualizarDatos(true, true); }, ajustes: pantallaAjustes, sello: pantallaSello, demo: pantallaDemo, ayuda: pantallaAyuda,
     usuarios: pantallaUsuarios, datos: () => { location.href = 'admin.html'; }, salir: cerrarSesion,
-    ficha: fichaAqui, puntos: pantallaPuntos, vol: pantallaVolumenes,
+    ficha: fichaAqui, puntos: pantallaPuntos, vol: pantallaVolumenes, met: () => pantallaMetrados(),
   })[b.dataset.a]());
 }
 
@@ -1447,7 +2040,7 @@ async function pantallaUsuarios() {
     return g.length ? `<h3 class="grupo-usuarios">${titulo} (${g.length})</h3>${g.map(fila).join('')}` : '';
   };
   c.innerHTML = `<p class="ayuda">Quien abre la app e inicia sesión por primera vez aparece aquí como solicitud.
-      <b>Campo</b>: mapa, recorrido y observaciones · <b>Técnico</b>: + secciones y metrados · <b>Acceso total</b>: toda la información.</p>
+      <b>Campo</b>: mapa, recorrido y observaciones · <b>Técnico</b>: + secciones, cambios de elementos y registro de metrados · <b>Acceso total</b>: + verifica u observa los metrados.</p>
     ${grupo('PENDIENTE', 'Solicitudes por autorizar') || '<p class="ayuda">No hay solicitudes pendientes.</p>'}
     ${grupo('AUTORIZADO', 'Autorizados')}${grupo('DESACTIVADO', 'Desactivados')}${grupo('RECHAZADO', 'Rechazados')}
     <div class="botones"><button class="btn" id="u-registro">Registro de accesos</button><button class="btn peligro" id="u-cerrar">Cerrar todas las sesiones</button></div>`;
@@ -2061,7 +2654,8 @@ function pantallaAyuda() {
       <li>Lejos de la vía (o con el GPS en pausa), la mira <b>+</b> del centro del mapa te dice la progresiva del punto que mires.</li>
       <li>En el mapa: cuadros de color = elementos de obra (cada tipo con su dibujo), flecha azul = tú, gota = observación, triángulo negro = BM, triángulo azul = punto geodésico (rojo si está observado).</li>
       <li>Técnicos y administrador: en el elemento, <b>✎ Editar / mover</b> para cambiar su progresiva o lado (con tu GPS o la mira del mapa), su estado o anularlo; en ☰ → Elementos de obra, <b>＋ Nuevo elemento</b>. Cada cambio pide el motivo y el documento y queda en el <b>historial</b>; la ubicación del expediente se ve como un punto gris.</li>
-      <li>Toca la vía o la progresiva de arriba para abrir la <b>ficha de esa progresiva</b>: curva, láminas de la sección típica del plano (tócalas para ampliar), paquete estructural, elementos, puntos de control y observaciones cercanas.</li>
+      <li>Toca la vía o la progresiva de arriba para abrir la <b>ficha de esa progresiva</b>: curva, sección transversal, láminas de la sección típica del plano (tócalas para ampliar), paquete estructural, elementos, metrados, puntos de control y observaciones cercanas.</li>
+      <li>Técnicos: ☰ → <b>Metrados ejecutados</b> → <b>＋ Registrar metrado</b>: partida, fecha, tramo (con tu GPS o la mira), lado, cantidad, sustento y fotos. «Calcular» propone el metrado con las secciones del tramo. Queda <b>por verificar</b> hasta que Acceso total o el administrador lo verifique u observe; solo lo verificado suma al avance. En el mapa, capa «Avance de metrados».</li>
       <li>Para ahorrar batería: ☰ → <b>Pausar GPS</b>.</li>
     </ol>
     <p class="ayuda">En iPhone, los avisos funcionan con la app abierta y la pantalla encendida.</p>`);

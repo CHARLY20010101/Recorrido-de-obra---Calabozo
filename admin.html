@@ -48,7 +48,7 @@
   </div>
 
   <div class="tarjeta">
-    <h2>3. Elementos de obra y BM</h2>
+    <h2>3. Elementos, puntos, sección típica y partidas</h2>
     <p class="ayuda">Lo habitual es editar la hoja <b>ELEMENTOS</b> directamente en Google Sheets: cambia una progresiva o agrega una fila, y la app del equipo se actualiza sola. Usa esta carga solo para reemplazar la tabla completa desde un CSV.</p>
     <p class="ayuda">Columnas de ELEMENTOS: CODIGO, TIPO, PROG_INI, PROG_FIN, LADO (LI/LD), DESCRIPCION, ESTADO, OBS. Columnas de BM: CODIGO, E, N, PROG, DIST_EJE.</p>
     <p class="ayuda">PUNTOS (red de control): CODIGO, CODIGO_ANTERIOR, TIPO (GEODESICO/BM/PC/OTRO), ORDEN, E, N, COTA, ESTADO (VIGENTE/OBSERVADO/REEMPLAZADO/ANULADO), FUENTE, FECHA, OBS.
@@ -62,6 +62,9 @@
       <label class="btn crece" style="display:flex;align-items:center;justify-content:center">CSV de SECCIÓN TÍPICA<input id="f-sec" type="file" accept=".csv" hidden></label>
       <label class="btn crece" style="display:flex;align-items:center;justify-content:center">CSV de BM (antiguo)<input id="f-bm" type="file" accept=".csv" hidden></label>
     </div>
+    <p class="ayuda" style="margin-top:12px"><b>PARTIDAS</b> (presupuesto del contrato, para los metrados ejecutados): ITEM, DESCRIPCION, UND, METRADO_CONTRATO, PU, NIVEL (TITULO/PARTIDA), HERRAMIENTA, CRITERIO, CALCULO, OBS.
+      Se prepara con <b>01_scripts\armar_partidas.py</b>. El precio unitario queda solo en la hoja: la app del equipo no lo recibe. Reemplazar las partidas no borra los metrados registrados.</p>
+    <label class="btn" style="display:flex;align-items:center;justify-content:center">CSV de PARTIDAS<input id="f-part" type="file" accept=".csv" hidden></label>
     <div id="r-tab" class="res"></div>
   </div>
 
@@ -130,7 +133,7 @@ const get = (a) => srv.llamar(a);
     const yo = await srv.yo();
     if (yo.rol !== 'admin') return res('#r-con', 'Tu cuenta no es la del administrador del proyecto.');
     const d = await get('proyecto');
-    res('#r-con', `Conectado a «${d.config.NOMBRE}» como ${yo.correo}: eje de ${d.eje.length} vértices, ${d.elementos.length} elementos, ${d.bm.length} BM.`, true);
+    res('#r-con', `Conectado a «${d.config.NOMBRE}» como ${yo.correo}: eje de ${d.eje.length} vértices, ${d.elementos.length} elementos, ${d.bm.length} BM, ${(d.partidas || []).filter((x) => x.nivel !== 'TITULO').length} partidas.`, true);
     verLogo(d.logo);
     verLaminas(d.laminas || []);
     verSecciones(d.secciones || []);
@@ -200,6 +203,7 @@ $('#f-elem').onchange = subirCSV('ELEMENTOS');
 $('#f-bm').onchange = subirCSV('BM');
 $('#f-pts').onchange = subirCSV('PUNTOS');
 $('#f-sec').onchange = subirCSV('SECCION_TIPICA');
+$('#f-part').onchange = subirCSV('PARTIDAS');
 
 // ---- logo: se reduce a 600 px como máximo (PNG conserva la transparencia) ----
 function verLogo(src) {
