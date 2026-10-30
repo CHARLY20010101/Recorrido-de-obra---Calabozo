@@ -1,6 +1,6 @@
 // Guarda la app y los mapas vistos para que funcione sin señal.
 // Al publicar cambios en la app hay que subir VERSION: así los celulares descargan la nueva.
-const VERSION = 'recorrido-v2.2.0';
+const VERSION = 'recorrido-v2.3.0';
 const APP = [
   './', 'index.html', 'admin.html', 'privacidad.html', 'manifest.webmanifest', 'css/app.css',
   'js/app.js', 'js/geo.js', 'js/store.js', 'js/api.js', 'js/fotos.js', 'js/dxf.js', 'js/iconos.js', 'js/camara.js', 'js/seccion.js', 'js/laminas.js',

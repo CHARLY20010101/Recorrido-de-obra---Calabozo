@@ -34,9 +34,10 @@ export function svgTipo(tipo, tam = 20) {
 }
 
 // Icono en el mapa (Leaflet)
-export function iconoElemento(tipo, color) {
+// clase: '' | 'anulado' (gris y transparente) | 'pendiente' (cambio aún no enviado al servidor)
+export function iconoElemento(tipo, color, clase = '') {
   return L.divIcon({
-    className: 'mk-elem',
+    className: 'mk-elem' + (clase ? ' ' + clase : ''),
     html: `<div class="ie" style="background:${color}">${svgTipo(tipo)}</div>`,
     iconSize: [32, 32], iconAnchor: [16, 16], popupAnchor: [0, -16],
   });

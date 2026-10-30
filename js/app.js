@@ -1,14 +1,14 @@
 // Recorrido de Obra: mapa del eje, progresiva en vivo, avisos y observaciones.
 import { Eje, latLonAUtm, utmALatLon, fmtProg, parseProg, fmtLado, fmtLadoProg } from './geo.js';
 import { kv, obsDB, uid } from './store.js';
-import { api, leerEnlace, irAGoogle, leerRegreso } from './api.js';
+import { api, leerEnlace, irAGoogle, leerRegreso, ErrorServidor } from './api.js';
 import { leerExif, reducir } from './fotos.js';
 import { iconoElemento, iconoPunto, iconoUsuario, miniTipo, svgPunto } from './iconos.js';
 import { leerSecciones, seccionEn, svgSeccion } from './seccion.js';
 import { abrirCamara, componer, ESTILO_BASE } from './camara.js';
 import { abrirVisor, medidas, miniatura, nombreCorto } from './laminas.js';
 
-const VERSION_APP = '2.2.0';
+const VERSION_APP = '2.3.0';
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const RAD = Math.PI / 180;
@@ -31,7 +31,7 @@ const TIPOS_BASE = {
 
 const S = {
   proyectos: [], actual: null, datos: null, eje: null, tipos: {}, elementos: [], puntos: [], secciones: [],
-  laminas: [], lamCache: {}, lamURL: {}, lamSel: null,
+  laminas: [], lamCache: {}, lamURL: {}, lamSel: null, lamFirma: '', elemPend: [],
   ajustes: { ...AJUSTES_BASE }, obs: [],
   pos: null, u: null, watch: null, pausado: false, gpsError: '', enVia: false, seguir: true, sim: null, wake: null,
   hist: [], dir: 1, ultTramo: null, avisados: new Set(), fueraCont: 0, avisoFuera: false,
@@ -105,13 +105,27 @@ function dibujarProyecto() {
     }
   }
   for (const e of S.elementos) {
-    const color = colorTipo(e.tipo), off = offLado(e.lado);
+    const anulado = e.estado === 'ANULADO';
+    const color = anulado ? '#9e9e9e' : colorTipo(e.tipo), off = offLado(e.lado);
     const tramo = e.fin != null && Math.abs(e.fin - e.ini) > 1;
     // tramos: línea de color a lo largo del eje; el icono va en el punto medio
-    if (tramo) L.polyline(S.eje.tramoLatLon(e.ini, e.fin, off), { color, weight: 6, opacity: .9 }).bindPopup(() => popupElemento(e)).addTo(G.elem);
-    const p = tramo ? (e.ini + e.fin) / 2 : e.ini;
-    e.capa = L.marker(S.eje.puntoLatLon(p, off), { icon: iconoElemento(e.tipo, color), title: `${e.codigo} · ${e.desc}`, riseOnHover: true })
+    if (tramo) L.polyline(S.eje.tramoLatLon(e.ini, e.fin, off), { color, weight: 6, opacity: anulado ? .5 : .9, dashArray: anulado ? '6 8' : null })
       .bindPopup(() => popupElemento(e)).addTo(G.elem);
+    const p = tramo ? (e.ini + e.fin) / 2 : e.ini;
+    e.capa = L.marker(S.eje.puntoLatLon(p, off), {
+      icon: iconoElemento(e.tipo, color, anulado ? 'anulado' : e.pendiente ? 'pendiente' : ''),
+      title: `${e.codigo} · ${e.desc}${anulado ? ' (ANULADO)' : ''}`, riseOnHover: true, zIndexOffset: anulado ? -500 : 0,
+    }).bindPopup(() => popupElemento(e)).addTo(G.elem);
+    // si se movió: punto y línea gris a la ubicación que tenía en el expediente
+    if (movido(e)) {
+      const offE = offLado(e.ladoExp), tramoE = e.finExp != null && Math.abs(e.finExp - e.iniExp) > 1;
+      const pE = S.eje.puntoLatLon(tramoE ? (e.iniExp + e.finExp) / 2 : e.iniExp, offE);
+      if (tramoE) L.polyline(S.eje.tramoLatLon(e.iniExp, e.finExp, offE), { color: '#fff', weight: 4, opacity: .9, dashArray: '6 6', interactive: false }).addTo(G.elem);
+      L.polyline([pE, e.capa.getLatLng()], { color: '#fff', weight: 5, opacity: .7, interactive: false }).addTo(G.elem);
+      L.polyline([pE, e.capa.getLatLng()], { color: '#212121', weight: 2, opacity: .9, dashArray: '4 4', interactive: false }).addTo(G.elem);
+      L.circleMarker(pE, { radius: 7, color: '#212121', weight: 2, dashArray: '3 2', fillColor: '#fff', fillOpacity: .9 })
+        .bindTooltip(`${e.codigo}: ubicación del expediente (Km ${fmtProg(e.iniExp)}${e.ladoExp ? ' ' + e.ladoExp : ''})`).addTo(G.elem);
+    }
   }
   for (const p of S.puntos) {
     p.capa = L.marker([p.lat, p.lon], { icon: iconoPunto(p.tipo, p.estado, p.codigo), title: p.codigo })
@@ -247,8 +261,8 @@ function fichaProgresiva(prog) {
       : '<p class="ayuda">El proyecto aún no tiene cargada la sección típica (hoja SECCION_TIPICA).</p>'}
 
     <h3 class="ficha-t">Elementos de obra (±150 m)</h3>
-    ${elems.map(({ e, d }) => `<button class="item" data-e="${S.elementos.indexOf(e)}">${miniTipo(e.tipo, colorTipo(e.tipo))}
-      <span><span class="t">${esc(e.codigo)}</span><br><span class="s">${esc(e.desc)}</span></span>
+    ${elems.map(({ e, d }) => `<button class="item ${e.estado === 'ANULADO' ? 'anulado' : ''}" data-e="${S.elementos.indexOf(e)}">${miniTipo(e.tipo, e.estado === 'ANULADO' ? '#9e9e9e' : colorTipo(e.tipo))}
+      <span><span class="t">${esc(e.codigo)}</span>${e.estado !== 'PENDIENTE' ? ' ' + etqEstadoElem(e.estado) : ''}<br><span class="s">${esc(e.desc)}</span></span>
       <span class="der">${d === 0 ? 'aquí' : `${Math.abs(Math.round(d))} m ${d > 0 ? 'adelante' : 'atrás'}`}<br><span class="s">${e.lado || ''}</span></span></button>`).join('') || '<p class="ayuda">Ninguno en este tramo.</p>'}
 
     <h3 class="ficha-t">Puntos de control más cercanos</h3>
@@ -261,7 +275,8 @@ function fichaProgresiva(prog) {
     ${obs.map((o) => `<button class="item" data-o="${esc(o.id)}"><span><span class="t">${esc(o.categoria)} · Km ${fmtProg(o.prog)}</span><br>
       <span class="s">${esc((o.texto || '').slice(0, 70))}</span></span><span class="der"><span class="etq ${o.estado === 'LEVANTADA' ? 'ok' : 'mal'}">${esc(o.estado)}</span></span></button>`).join('') || '<p class="ayuda">Ninguna en este tramo.</p>'}
 
-    <div class="botones"><button class="btn" id="fk-mapa">Ver en el mapa</button><button class="btn primario" id="fk-obs">＋ Observación aquí</button></div>`);
+    <div class="botones"><button class="btn" id="fk-mapa">Ver en el mapa</button><button class="btn primario" id="fk-obs">＋ Observación aquí</button></div>
+    ${puede('tecnico') ? '<button class="btn" id="fk-elem" style="width:100%;margin-top:8px">＋ Nuevo elemento aquí</button>' : ''}`);
 
   c.querySelectorAll('[data-p]').forEach((b) => b.onclick = () => {
     const p = prog + +b.dataset.p;
@@ -279,6 +294,7 @@ function fichaProgresiva(prog) {
   c.querySelectorAll('[data-o]').forEach((b) => b.onclick = () => abrirObs(b.dataset.o));
   c.querySelector('#fk-mapa').onclick = () => { cerrarHoja(); setSeguir(false); mapa.setView(pt, Math.max(mapa.getZoom(), 17)); };
   c.querySelector('#fk-obs').onclick = () => abrirObs(null, { prog, off: 0, fuente: 'Ficha de progresiva' });
+  c.querySelector('#fk-elem')?.addEventListener('click', () => editarElemento(null, { prog }));
   S.fichaProg = { prog, curva, sec };
   pintarLaminaFicha();
 }
@@ -378,13 +394,226 @@ const ladoRel = (lado) => (!lado ? '' : (lado === 'LI') === (S.dir > 0) ? 'izqui
 function popupElemento(e) {
   const d = document.createElement('div');
   const lado = e.lado ? `<br>Lado: ${e.lado === 'LI' ? 'izquierdo (LI)' : 'derecho (LD)'} según la progresiva${S.enVia ? ` · <b>a tu ${ladoRel(e.lado)}</b>` : ''}` : '';
+  const editar = puede('tecnico');
   d.innerHTML = `<h3>${esc(e.codigo)}</h3>${esc(e.desc)}<br>
-    <b>Km ${fmtProg(e.ini)}${e.fin != null ? ' – ' + fmtProg(e.fin) : ''}</b>${lado}<br>
-    Estado: <span class="etq">${esc(e.estado || '—')}</span>${e.obs ? `<p class="ayuda">${esc(e.obs)}</p>` : ''}
-    <div class="fila" style="margin-top:8px"><button class="btn primario crece" data-a="obs">＋ Observación</button><button class="btn crece" data-a="ficha">Ficha Km</button></div>`;
+    <b>Km ${fmtUbic(e.ini, e.fin)}</b>${lado}<br>
+    Estado: ${etqEstadoElem(e.estado)}${e.pendiente ? ' <span class="etq pend">por enviar</span>' : ''}
+    ${movido(e) ? `<br><span class="ayuda">En el expediente: Km ${fmtUbic(e.iniExp, e.finExp)}${e.ladoExp ? ' ' + e.ladoExp : ''}</span>` : ''}
+    ${e.origen === 'NUEVO' ? '<br><span class="ayuda">No está en el expediente (agregado en obra)</span>' : ''}
+    ${e.obs ? `<p class="ayuda">${esc(e.obs)}</p>` : ''}
+    ${e.actualizadoPor ? `<br><span class="ayuda">Último cambio:${esc(e.actualizadoPor)}${e.actualizado ? ' · ' + fechaCorta(e.actualizado) : ''}</span>` : ''}
+    <div class="fila" style="margin-top:8px"><button class="btn primario crece" data-a="obs">＋ Observación</button><button class="btn crece" data-a="ficha">Ficha Km</button></div>
+    ${editar || proyActual()?.url ? `<div class="fila" style="margin-top:6px">${editar ? '<button class="btn crece" data-a="editar">✎ Editar / mover</button>' : ''}
+      ${proyActual()?.url ? '<button class="btn crece" data-a="hist">🕘 Historial</button>' : ''}</div>` : ''}`;
   d.querySelector('[data-a="obs"]').onclick = () => { mapa.closePopup(); abrirObs(null, { elemento: e.codigo, prog: e.ini, off: offLado(e.lado), fuente: 'Elemento' }); };
   d.querySelector('[data-a="ficha"]').onclick = () => { mapa.closePopup(); fichaProgresiva(e.ini); };
+  d.querySelector('[data-a="editar"]')?.addEventListener('click', () => { mapa.closePopup(); editarElemento(e); });
+  d.querySelector('[data-a="hist"]')?.addEventListener('click', () => { mapa.closePopup(); verHistorialElem(e); });
   return d;
+}
+
+// ================= cambios de elementos: mover, agregar, anular (con historial en el servidor) =================
+const ESTADOS_ELEM = ['PENDIENTE', 'REPLANTEADO', 'REUBICADO', 'NUEVO', 'EN EJECUCIÓN', 'EJECUTADO', 'OBSERVADO', 'ANULADO'];
+const CLASE_ESTADO = { EJECUTADO: 'ok', OBSERVADO: 'mal', ANULADO: 'gris', REUBICADO: 'info', NUEVO: 'info', REPLANTEADO: 'info', 'EN EJECUCIÓN': 'info' };
+const etqEstadoElem = (e) => `<span class="etq ${CLASE_ESTADO[e] || ''}">${esc(e || '—')}</span>`;
+const ACCION_ELEM = { NUEVO: 'Agregado', MOVIDO: 'Movido', EDITADO: 'Editado', ANULADO: 'Anulado', RESTAURADO: 'Restaurado', EDICION_HOJA: 'Editado en la hoja' };
+const numONull = (v) => (v === '' || v == null || isNaN(+v) ? null : +v);
+const igualProg = (a, b) => (a == null ? b == null : b != null && Math.abs(a - b) < 0.005);
+const fmtUbic = (ini, fin) => fmtProg(ini) + (fin != null ? ' – ' + fmtProg(fin) : '');
+// el elemento ya no está donde decía el expediente
+const movido = (e) => e.iniExp != null && (!igualProg(e.iniExp, e.ini) || !igualProg(e.finExp, e.fin) || e.ladoExp !== e.lado);
+
+function leerElementos(filas) {
+  return filas.filter((e) => e.CODIGO && e.PROG_INI !== '' && e.PROG_INI != null).map((e) => ({
+    codigo: String(e.CODIGO), tipo: String(e.TIPO || 'OTR'), ini: +e.PROG_INI, fin: numONull(e.PROG_FIN),
+    lado: String(e.LADO || '').toUpperCase(), desc: String(e.DESCRIPCION || nombreTipo(e.TIPO)),
+    estado: String(e.ESTADO || 'PENDIENTE'), obs: e.OBS, origen: e.ORIGEN || '',
+    iniExp: numONull(e.PROG_INI_EXP), finExp: numONull(e.PROG_FIN_EXP), ladoExp: String(e.LADO_EXP || '').toUpperCase(),
+    actualizado: e.ACTUALIZADO || '', actualizadoPor: e.ACTUALIZADO_POR || '', pendiente: !!e._pend,
+  })).sort((a, b) => a.ini - b.ini);
+}
+
+// Cambios hechos en el teléfono que aún no llegan al servidor: se ven como si ya estuvieran guardados
+function conPendientes(filas, pend) {
+  if (!pend?.length) return filas;
+  const out = filas.map((f) => ({ ...f }));
+  for (const d of pend) {
+    let f = out.find((x) => String(x.CODIGO).toUpperCase() === d.codigo);
+    if (!f) { if (!d.nuevo) continue; f = { CODIGO: d.codigo, ORIGEN: 'NUEVO' }; out.push(f); }
+    const movio = !d.nuevo && (!igualProg(numONull(f.PROG_INI), d.ini) || !igualProg(numONull(f.PROG_FIN), d.fin) || String(f.LADO || '').toUpperCase() !== d.lado);
+    if (movio && numONull(f.PROG_INI_EXP) == null && f.ORIGEN !== 'NUEVO') Object.assign(f, { PROG_INI_EXP: f.PROG_INI, PROG_FIN_EXP: f.PROG_FIN, LADO_EXP: f.LADO });
+    Object.assign(f, { TIPO: d.tipo, PROG_INI: d.ini, PROG_FIN: d.fin ?? '', LADO: d.lado, DESCRIPCION: d.desc, ESTADO: d.estado, OBS: d.obs,
+      ACTUALIZADO: new Date(d.t || Date.now()).toISOString(), ACTUALIZADO_POR: S.ajustes.nombre || S.sesion?.nombre || '', _pend: true });
+  }
+  return out;
+}
+
+// Guarda el cambio: en un proyecto con servidor queda en cola y se envía (también sin señal, más tarde)
+async function guardarCambioElemento(d) {
+  const p = proyActual();
+  if (!p.url) {
+    // proyecto de archivo: el cambio queda solo en este teléfono
+    S.datos.elementos = conPendientes(S.datos.elementos || [], [d]).map(({ _pend, ...f }) => f);
+    await kv.set('datos:' + p.id, S.datos);
+    aplicarDatos(S.datos);
+    return mostrarAviso('Cambio guardado en este teléfono', 'info');
+  }
+  S.elemPend.push({ ...d, t: Date.now() });
+  await kv.set('elem_pend:' + p.id, S.elemPend);
+  aplicarDatos(S.datos);
+  mostrarAviso(navigator.onLine ? 'Cambio guardado. Enviando…' : 'Cambio guardado en el teléfono. Se enviará cuando haya señal.', 'info');
+  await sincronizar();
+}
+
+// Pantalla para editar, mover o anular un elemento, o agregar uno nuevo.
+// f trae el formulario a medio llenar al volver de elegir un punto en el mapa.
+function editarElemento(e = null, pre = {}, f = null) {
+  if (!S.eje) return;
+  if (!puede('tecnico')) return mostrarAviso('Tu rol no permite cambiar elementos. Pídelo al administrador.');
+  const nuevo = !e;
+  const siguiente = (t) => { let n = 1; while (S.elementos.some((x) => x.codigo === `${t}-N${String(n).padStart(2, '0')}`)) n++; return `${t}-N${String(n).padStart(2, '0')}`; };
+  const tipo0 = e?.tipo || pre.tipo || 'ALC';
+  f = f || {
+    codigo: e?.codigo || siguiente(tipo0), tipo: tipo0, ini: e?.ini ?? Math.round(pre.prog ?? 0), fin: e?.fin ?? null,
+    lado: e?.lado ?? pre.lado ?? '', desc: e?.desc || '', estado: e?.estado || 'NUEVO', obs: e?.obs || '', motivo: '', documento: '', estadoTocado: false,
+  };
+  const tipos = [...new Set([...Object.keys(S.tipos), ...Object.keys(TIPOS_BASE)])];
+  const actual = e ? `Ahora: Km ${fmtUbic(e.ini, e.fin)}${e.lado ? ' ' + e.lado : ''}` : '';
+  const exp = e && movido(e) ? ` · en el expediente: Km ${fmtUbic(e.iniExp, e.finExp)}${e.ladoExp ? ' ' + e.ladoExp : ''}` : '';
+  const c = hoja(nuevo ? 'Nuevo elemento' : `Editar ${e.codigo}`, `
+    ${nuevo ? `<label class="campo" for="ee-cod">Código</label><input id="ee-cod" type="text" value="${esc(f.codigo)}" autocapitalize="characters" maxlength="30">
+      <p class="ayuda">Propuesto como TIPO-N01; puedes poner el código del replanteo.</p>` : ''}
+    <label class="campo" for="ee-tipo">Tipo</label>
+    <select id="ee-tipo">${tipos.map((t) => `<option value="${esc(t)}" ${t === f.tipo ? 'selected' : ''}>${esc(nombreTipo(t))}</option>`).join('')}</select>
+    <label class="campo">Ubicación</label>
+    ${e ? `<p class="ayuda" style="margin-top:0">${esc(actual + exp)}</p>` : ''}
+    <div class="fila"><div class="crece"><span class="ayuda">Progresiva${f.fin != null ? ' de inicio' : ''}</span><input id="ee-ini" type="text" inputmode="decimal" value="${fmtProg(f.ini, 1)}"></div>
+      <div class="crece"><span class="ayuda">Fin (solo tramos)</span><input id="ee-fin" type="text" inputmode="decimal" placeholder="—" value="${f.fin != null ? fmtProg(f.fin, 1) : ''}"></div></div>
+    <div class="fila" style="margin-top:6px"><span class="ayuda" style="width:46px">Inicio</span><button class="btn crece" data-u="gps-ini">📍 Mi GPS</button><button class="btn crece" data-u="mapa-ini">✛ Mapa</button></div>
+    <div class="fila" style="margin-top:6px"><span class="ayuda" style="width:46px">Fin</span><button class="btn crece" data-u="gps-fin">📍 Mi GPS</button><button class="btn crece" data-u="mapa-fin">✛ Mapa</button></div>
+    <label class="campo">Lado (según los planos)</label>
+    <div class="chips" id="ee-lado">${[['LI', 'Izquierdo (LI)'], ['', 'Eje / ambos'], ['LD', 'Derecho (LD)']].map(([k, t]) => `<button data-l="${k}" class="${f.lado === k ? 'sel' : ''}">${t}</button>`).join('')}</div>
+    <label class="campo" for="ee-desc">Descripción</label><input id="ee-desc" type="text" value="${esc(f.desc)}" placeholder="${esc(nombreTipo(f.tipo))}">
+    <label class="campo">Estado</label>
+    <div class="chips" id="ee-est">${ESTADOS_ELEM.map((k) => `<button data-s="${k}" class="${k === f.estado ? 'sel' : ''}">${k}</button>`).join('')}</div>
+    <label class="campo" for="ee-obs">Nota del elemento</label><input id="ee-obs" type="text" value="${esc(f.obs)}">
+    <label class="campo" for="ee-mot">Motivo del cambio <span style="color:var(--mal)">*</span></label>
+    <textarea id="ee-mot" placeholder="Ej.: en el replanteo el cauce está 20 m antes">${esc(f.motivo)}</textarea>
+    <label class="campo" for="ee-doc">Documento de sustento</label>
+    <input id="ee-doc" type="text" value="${esc(f.documento)}" placeholder="Asiento N°, carta, consulta, plano…">
+    <p class="ayuda">El cambio queda en el historial del elemento con tu nombre, la fecha, el motivo y el documento.${e && !movido(e) && e.origen !== 'NUEVO' ? ' Si lo mueves, se guarda su ubicación del expediente.' : ''}</p>
+    <div class="botones"><button class="btn" id="ee-cancel">Cancelar</button><button class="btn primario" id="ee-ok">Guardar</button></div>
+    ${!nuevo && f.estado !== 'ANULADO' ? '<button class="btn peligro" id="ee-anular" style="width:100%;margin-top:8px">Anular elemento</button>' : ''}`);
+
+  const leer = () => {
+    if (nuevo) f.codigo = c.querySelector('#ee-cod').value.trim().toUpperCase();
+    f.tipo = c.querySelector('#ee-tipo').value;
+    const ini = parseProg(c.querySelector('#ee-ini').value), finTxt = c.querySelector('#ee-fin').value.trim();
+    if (ini != null) f.ini = ini;
+    f.fin = finTxt ? parseProg(finTxt) ?? f.fin : null;
+    f.desc = c.querySelector('#ee-desc').value.trim();
+    f.obs = c.querySelector('#ee-obs').value.trim();
+    f.motivo = c.querySelector('#ee-mot').value.trim();
+    f.documento = c.querySelector('#ee-doc').value.trim();
+  };
+  // al mover un elemento del expediente se propone el estado REUBICADO
+  const proponerEstado = () => {
+    if (!e || f.estadoTocado || !['PENDIENTE', 'REPLANTEADO'].includes(e.estado)) return;
+    const cambia = !igualProg(f.ini, e.ini) || !igualProg(f.fin, e.fin) || f.lado !== e.lado;
+    f.estado = cambia ? 'REUBICADO' : e.estado;
+    c.querySelectorAll('#ee-est button').forEach((b) => b.classList.toggle('sel', b.dataset.s === f.estado));
+  };
+  const ponerUbic = (cual, u) => {
+    const p = Math.round(u.prog * 10) / 10;
+    if (cual === 'ini') { f.ini = p; c.querySelector('#ee-ini').value = fmtProg(p, 1); if (f.lado && Math.abs(u.off) > 1.5) f.lado = u.off < 0 ? 'LI' : 'LD'; }
+    else { f.fin = p; c.querySelector('#ee-fin').value = fmtProg(p, 1); }
+    c.querySelectorAll('#ee-lado button').forEach((b) => b.classList.toggle('sel', b.dataset.l === f.lado));
+    proponerEstado();
+  };
+  c.querySelector('#ee-tipo').onchange = () => { if (nuevo) { const t = c.querySelector('#ee-tipo').value; if (/-N\d\d$/.test(c.querySelector('#ee-cod').value)) c.querySelector('#ee-cod').value = siguiente(t); } };
+  c.querySelector('#ee-ini').onchange = () => { leer(); proponerEstado(); };
+  c.querySelector('#ee-fin').onchange = () => { leer(); proponerEstado(); };
+  c.querySelectorAll('#ee-lado button').forEach((b) => b.onclick = () => {
+    f.lado = b.dataset.l; c.querySelectorAll('#ee-lado button').forEach((x) => x.classList.toggle('sel', x === b)); proponerEstado();
+  });
+  c.querySelectorAll('#ee-est button').forEach((b) => b.onclick = () => {
+    f.estado = b.dataset.s; f.estadoTocado = true; c.querySelectorAll('#ee-est button').forEach((x) => x.classList.toggle('sel', x === b));
+  });
+  c.querySelectorAll('[data-u]').forEach((b) => b.onclick = () => {
+    const [como, cual] = b.dataset.u.split('-');
+    leer();
+    if (como === 'mapa') {
+      cerrarHoja();
+      return elegirEnMapa(`Mueve el mapa hasta poner la mira + en el ${cual === 'ini' ? 'inicio' : 'fin'} de ${f.codigo}`, (u) => {
+        editarElemento(e, pre, f);
+        if (u) ponerUbic(cual, u);
+      }, e ? (cual === 'fin' && e.fin != null ? e.fin : e.ini) : f.ini);
+    }
+    // GPS: la posición del recorrido si es reciente; si no, se pide una nueva
+    if (S.pos && !S.pos.simulada && Date.now() - S.pos.t < 15000 && S.u) return ponerUbic(cual, S.u);
+    mostrarAviso('Buscando tu posición GPS…', 'info');
+    navigator.geolocation.getCurrentPosition((p) => {
+      $('#aviso').classList.add('oculto');
+      const u = ubicarLatLon(p.coords.latitude, p.coords.longitude);
+      if (u.dist > 200) return mostrarAviso(`Estás a ${Math.round(u.dist)} m del eje: acércate al elemento`);
+      ponerUbic(cual, u);
+    }, () => mostrarAviso('No se pudo obtener la posición GPS'), { enableHighAccuracy: true, timeout: 20000 });
+  });
+  c.querySelector('#ee-cancel').onclick = cerrarHoja;
+
+  const guardar = async (anular = false) => {
+    leer();
+    if (anular) f.estado = 'ANULADO';
+    if (nuevo && !/^[A-Z0-9][\w.+-]{0,29}$/.test(f.codigo)) return mostrarAviso('Código no válido: usa letras, números y guiones');
+    if (nuevo && S.elementos.some((x) => x.codigo.toUpperCase() === f.codigo)) return mostrarAviso(`Ya existe el elemento ${f.codigo}`);
+    if (f.ini == null || isNaN(f.ini)) return mostrarAviso('Progresiva no válida');
+    if (f.ini < S.eje.inicio - 50 || f.ini > S.eje.fin + 50) return mostrarAviso(`La progresiva está fuera de la vía (${fmtProg(S.eje.inicio)} a ${fmtProg(S.eje.fin)})`);
+    if (f.fin != null && igualProg(f.fin, f.ini)) f.fin = null;
+    if (!f.motivo) { c.querySelector('#ee-mot').focus(); return mostrarAviso('Escribe el motivo del cambio'); }
+    if (anular && !confirm(`¿Anular ${f.codigo}? Se verá en gris y ya no se avisará en el recorrido. Queda en el historial y se puede restaurar.`)) return;
+    cerrarHoja();
+    await guardarCambioElemento({
+      codigo: f.codigo.toUpperCase(), nuevo, tipo: f.tipo, ini: Math.round(f.ini * 100) / 100, fin: f.fin == null ? null : Math.round(f.fin * 100) / 100,
+      lado: f.lado, desc: f.desc || nombreTipo(f.tipo), estado: f.estado, obs: f.obs, motivo: f.motivo, documento: f.documento,
+    });
+  };
+  c.querySelector('#ee-ok').onclick = () => guardar(false);
+  c.querySelector('#ee-anular')?.addEventListener('click', () => guardar(true));
+}
+
+// Deja ver el mapa para elegir un punto con la mira +; al aceptar devuelve la progresiva y el lado
+function elegirEnMapa(texto, alTerminar, cerca = null) {
+  setSeguir(false);
+  if (cerca != null) mapa.setView(S.eje.puntoLatLon(cerca), Math.max(mapa.getZoom(), 18));
+  document.body.classList.add('eligiendo');
+  const b = document.createElement('div');
+  b.id = 'elegir';
+  b.innerHTML = `<p>${esc(texto)}</p><p class="prog"></p>
+    <div class="fila"><button class="btn crece" data-a="no">Cancelar</button><button class="btn primario crece" data-a="si">Aceptar este punto</button></div>`;
+  document.body.appendChild(b);
+  const leer = () => { const m = mapa.getCenter(), u = ubicarLatLon(m.lat, m.lng); b.querySelector('.prog').textContent = `Mira +: Km ${fmtProg(u.prog, 1)} · ${fmtLadoProg(u.off)}`; };
+  mapa.on('move', leer); leer();
+  const fin = (u) => { mapa.off('move', leer); b.remove(); document.body.classList.remove('eligiendo'); alTerminar(u); };
+  b.querySelector('[data-a="si"]').onclick = () => { const m = mapa.getCenter(); fin(ubicarLatLon(m.lat, m.lng)); };
+  b.querySelector('[data-a="no"]').onclick = () => fin(null);
+}
+
+async function verHistorialElem(e) {
+  const p = proyActual();
+  const pend = S.elemPend.filter((d) => d.codigo === e.codigo);
+  const expTxt = movido(e) ? `<p class="ayuda">Ubicación del expediente: Km ${fmtUbic(e.iniExp, e.finExp)}${e.ladoExp ? ' ' + e.ladoExp : ''} · ahora: Km ${fmtUbic(e.ini, e.fin)}${e.lado ? ' ' + e.lado : ''}</p>` : '';
+  const pendTxt = pend.map((d) => `<div class="hist pend"><b>Por enviar</b> · ${fechaCorta(d.t)}<div class="s">Km ${fmtUbic(d.ini, d.fin)}${d.lado ? ' ' + d.lado : ''} · ${esc(d.estado)}</div><div>Motivo: ${esc(d.motivo)}</div></div>`).join('');
+  const c = hoja(`Historial ${e.codigo}`, `${expTxt}${pendTxt}<p class="ayuda">Cargando…</p>`);
+  if (!navigator.onLine) { c.lastElementChild.textContent = 'Necesitas internet para ver el historial guardado en el servidor.'; return; }
+  try {
+    const { cambios } = await api(p, S.sesion).llamar('elem_historial', { codigo: e.codigo });
+    c.innerHTML = expTxt + pendTxt + (cambios.map((h) => `<div class="hist"><b>${esc(ACCION_ELEM[h.accion] || h.accion)}</b> · ${fechaCorta(h.fecha)} · ${esc(h.nombre)}
+        ${h.antes ? `<div class="s">Antes: ${esc(h.antes)}</div>` : ''}<div class="s">Después: ${esc(h.despues)}</div>
+        ${h.motivo ? `<div>Motivo: ${esc(h.motivo)}</div>` : ''}${h.documento ? `<div>Documento: <b>${esc(h.documento)}</b></div>` : ''}</div>`).join('')
+      || (pend.length ? '' : '<p class="ayuda">Sin cambios registrados: está como en el expediente.</p>'));
+  } catch (er) {
+    if (!(await manejarAcceso(er))) c.lastElementChild.textContent = 'No se pudo cargar el historial: ' + er.message;
+  }
 }
 
 function dibujarObs() {
@@ -502,14 +731,15 @@ $('#sentido').onclick = () => {
   mostrarAviso(`Sentido de avance: hacia ${fmtProg(S.dir > 0 ? S.eje.fin : S.eje.inicio)}`, 'info');
 };
 
+// los anulados no se avisan en el recorrido
 function elementosAvisables() {
   const t = S.ajustes.tipos;
-  return S.elementos.filter((e) => !t || t.includes(e.tipo));
+  return S.elementos.filter((e) => e.estado !== 'ANULADO' && (!t || t.includes(e.tipo)));
 }
 
 function textoProximo(u) {
   const lr = (e) => (e.lado ? ` · <b>a tu ${ladoRel(e.lado)}</b>` : '');
-  const dentro = S.elementos.filter((e) => e.fin != null && u.prog >= Math.min(e.ini, e.fin) && u.prog <= Math.max(e.ini, e.fin));
+  const dentro = S.elementos.filter((e) => e.estado !== 'ANULADO' && e.fin != null && u.prog >= Math.min(e.ini, e.fin) && u.prog <= Math.max(e.ini, e.fin));
   let prox = null, dmin = Infinity;
   for (const e of elementosAvisables()) {
     const pe = S.dir > 0 ? Math.min(e.ini, e.fin ?? e.ini) : Math.max(e.ini, e.fin ?? e.ini);
@@ -682,7 +912,7 @@ function pintarEstado(extra) {
   else if (S.gpsError && !S.sim) partes.push(`<span class="mal">${esc(S.gpsError.split(':')[0])}</span>`);
   if (S.ajustes.voz && !S.audioListo && p) partes.push('<button class="chip">🔇 Toca la pantalla para activar la voz</button>');
   if (!navigator.onLine) partes.push('<span class="mal">Sin internet</span>');
-  const pend = S.obs.filter((o) => o.sync !== 'ok').length;
+  const pend = S.obs.filter((o) => o.sync !== 'ok').length + S.elemPend.length;
   if (pend && p?.url) partes.push(`<span class="mal">${pend} por enviar</span>`);
   if (extra) partes.push(`<span class="mal">${esc(extra)}</span>`);
   $('#estado').innerHTML = partes.join(' · ');
@@ -701,16 +931,12 @@ function aplicarDatos(datos) {
   S.logo = datos.logo ? imagenDe(datos.logo) : null;
   S.tipos = {};
   for (const t of datos.tipos || []) S.tipos[t.TIPO] = [t.NOMBRE, t.COLOR || '#757575'];
-  S.elementos = (datos.elementos || []).filter((e) => e.CODIGO && e.PROG_INI !== '' && e.PROG_INI != null).map((e) => ({
-    codigo: String(e.CODIGO), tipo: String(e.TIPO || 'OTR'), ini: +e.PROG_INI,
-    fin: e.PROG_FIN === '' || e.PROG_FIN == null ? null : +e.PROG_FIN,
-    lado: String(e.LADO || '').toUpperCase(), desc: String(e.DESCRIPCION || nombreTipo(e.TIPO)),
-    estado: e.ESTADO, obs: e.OBS,
-  })).sort((a, b) => a.ini - b.ini);
+  S.elementos = leerElementos(conPendientes(datos.elementos || [], S.elemPend));
   S.secciones = leerSecciones(datos.seccionTipica);
   S.puntos = leerPuntos(datos);
   S.laminas = leerLaminas(datos);
-  colaLaminas();
+  const firma = S.laminas.map((l) => l.clave + '|' + l.actualizado).join(';');
+  if (firma !== S.lamFirma) { S.lamFirma = firma; colaLaminas(); }
   dibujarProyecto();
   if (S.eje && S.encuadrar && !S.enVia) mapa.fitBounds(L.latLngBounds(S.ejeLL), { padding: [20, 20] });
   S.encuadrar = false;
@@ -727,6 +953,7 @@ async function abrirProyecto(id) {
   // solicitud aún pendiente: se pregunta al servidor si ya fue autorizada
   if (p.url && S.sesion.estado !== 'AUTORIZADO' && !(await comprobarAcceso())) return;
   S.obs = await obsDB.todas(id);
+  S.elemPend = (await kv.get('elem_pend:' + id)) || [];
   // logo cargado en este celular para esta obra (tiene prioridad sobre el del proyecto)
   const ll = await kv.get('logo:' + id);
   S.logoLocal = ll ? imagenDe(ll) : null;
@@ -742,7 +969,7 @@ async function abrirProyecto(id) {
 function vaciarPantalla() {
   Object.values(S.lamURL).forEach((u) => URL.revokeObjectURL(u));
   Object.assign(S, { datos: null, eje: null, ejeLL: null, elementos: [], puntos: [], secciones: [], obs: [], logo: null, logoLocal: null, pendientes: 0,
-    laminas: [], lamCache: {}, lamURL: {} });
+    laminas: [], lamCache: {}, lamURL: {}, lamFirma: '', elemPend: [] });
   dibujarProyecto();
   $('#btn-menu').dataset.n = '';
 }
@@ -767,6 +994,8 @@ async function actualizarDatos(forzar = false, avisar = false) {
       aplicarDatos(d);
       if (habia) mostrarAviso('Se actualizaron el eje y los elementos del proyecto', 'info');
     } else if (avisar) mostrarAviso('Los datos ya están al día', 'info');
+    // láminas que no se pudieron descargar antes
+    if (S.laminas.some((l) => !S.lamCache[l.clave]?.svg)) colaLaminas();
     await sincronizar();
   } catch (e) {
     if (await manejarAcceso(e)) return;
@@ -795,7 +1024,7 @@ async function manejarAcceso(e) {
 
 // Borra del teléfono los datos de un proyecto: datos, láminas, observaciones, sesión y logo propio
 async function borrarProyectoLocal(id, quitarDeLista = false) {
-  for (const k of ['datos:', 'laminas:', 'sesion:', 'logo:']) await kv.del(k + id);
+  for (const k of ['datos:', 'laminas:', 'elem_pend:', 'sesion:', 'logo:']) await kv.del(k + id);
   for (const o of await obsDB.todas(id)) await obsDB.borrar(o.id);
   if (S.actual === id) { S.sesion = null; detenerGPS(); detenerSim(false); salirDeVia(); vaciarPantalla(); }
   if (quitarDeLista) { S.proyectos = S.proyectos.filter((x) => x.id !== id); await kv.set('proyectos', S.proyectos); }
@@ -896,8 +1125,8 @@ async function comprobarAcceso() {
 }
 
 async function cerrarSesion() {
-  const pend = S.obs.filter((o) => o.sync !== 'ok').length;
-  const msg = pend ? `Tienes ${pend} observaciones sin enviar: se perderán.\n\n¿Cerrar sesión igual?`
+  const pend = S.obs.filter((o) => o.sync !== 'ok').length + S.elemPend.length;
+  const msg = pend ? `Tienes ${pend} observaciones o cambios de elementos sin enviar: se perderán.\n\n¿Cerrar sesión igual?`
     : 'Al cerrar sesión se borran de este teléfono los datos del proyecto (se vuelven a descargar al entrar).\n\n¿Continuar?';
   if (!confirm(msg)) return;
   cerrarHoja();
@@ -919,6 +1148,25 @@ async function sincronizar() {
   sincronizando = true;
   try {
     const A = api(p, S.sesion);
+    // cambios de elementos hechos en el teléfono, en el orden en que se hicieron
+    let enviados = 0, rechazados = 0;
+    while (S.elemPend.length) {
+      const { t: _t, ...d } = S.elemPend[0];
+      try { await A.enviar('elemento_guardar', d); enviados++; } catch (e) {
+        // sin señal o sin acceso: queda en cola; si el servidor lo rechaza (dato no válido), se avisa y se descarta
+        if (!(e instanceof ErrorServidor) || ['SESION', 'PENDIENTE', 'REVOCADO', 'ACTUALIZAR'].includes(e.codigo)) throw e;
+        rechazados++;
+        mostrarAviso(`No se guardó el cambio de ${d.codigo}: ${e.message}`);
+      }
+      S.elemPend.shift();
+      await kv.set('elem_pend:' + p.id, S.elemPend);
+    }
+    if (enviados) {
+      const datos = await A.proyecto();
+      await kv.set('datos:' + p.id, datos);
+      aplicarDatos(datos);
+      if (!rechazados) mostrarAviso(enviados > 1 ? `${enviados} cambios de elementos guardados` : 'Cambio del elemento guardado', 'info');
+    } else if (rechazados) aplicarDatos(S.datos);
     for (const o of S.obs.filter((x) => x.sync !== 'ok')) {
       const { fotos: _, ...resto } = o;
       const obs = { ...resto, fotos: undefined };
@@ -1098,18 +1346,24 @@ function pantallaBuscar() {
 
 function pantallaElementos() {
   const tipos = [...new Set(S.elementos.map((e) => e.tipo))];
-  let filtro = null;
+  let filtro = null, vista = '';
+  const conCambios = (e) => movido(e) || e.origen === 'NUEVO' || e.pendiente || ['REUBICADO', 'NUEVO', 'ANULADO'].includes(e.estado);
+  const n = { cambios: S.elementos.filter(conCambios).length, anulados: S.elementos.filter((e) => e.estado === 'ANULADO').length };
   const c = hoja('Elementos de obra', `
+    ${puede('tecnico') ? '<button class="btn primario" id="e-nuevo" style="width:100%;margin-bottom:10px">＋ Nuevo elemento</button>' : ''}
     <input id="e-txt" type="search" placeholder="Buscar código o descripción">
-    <div class="chips" id="e-tipos" style="margin:10px 0"><button data-t="" class="sel">Todos</button>${tipos.map((t) => `<button data-t="${esc(t)}">${miniTipo(t, colorTipo(t), 22)}${esc(nombreTipo(t))}</button>`).join('')}</div>
+    <div class="chips" id="e-vista" style="margin-top:10px"><button data-v="" class="sel">Todos</button>
+      <button data-v="cambios">Con cambios (${n.cambios})</button><button data-v="anulados">Anulados (${n.anulados})</button></div>
+    <div class="chips" id="e-tipos" style="margin:10px 0"><button data-t="" class="sel">Todos los tipos</button>${tipos.map((t) => `<button data-t="${esc(t)}">${miniTipo(t, colorTipo(t), 22)}${esc(nombreTipo(t))}</button>`).join('')}</div>
     <div id="e-lista"></div>`);
   const pintar = () => {
     const q = c.querySelector('#e-txt').value.trim().toLowerCase();
-    const lst = S.elementos.filter((e) => (!filtro || e.tipo === filtro) && (!q || (e.codigo + ' ' + e.desc).toLowerCase().includes(q)));
-    c.querySelector('#e-lista').innerHTML = lst.slice(0, 400).map((e) => `<button class="item" data-i="${S.elementos.indexOf(e)}">
-      ${miniTipo(e.tipo, colorTipo(e.tipo))}
-      <span><span class="t">${esc(e.codigo)}</span><br><span class="s">${esc(e.desc)}${e.obs ? ' · ⚠' : ''}</span></span>
-      <span class="der">${fmtProg(e.ini)}${e.fin != null ? '<br><span class="s">a ' + fmtProg(e.fin) + '</span>' : ''}<br><span class="etq">${esc(e.estado || '')}</span></span></button>`).join('')
+    const lst = S.elementos.filter((e) => (!filtro || e.tipo === filtro) && (!q || (e.codigo + ' ' + e.desc).toLowerCase().includes(q))
+      && (vista !== 'cambios' || conCambios(e)) && (vista !== 'anulados' || e.estado === 'ANULADO'));
+    c.querySelector('#e-lista').innerHTML = lst.slice(0, 400).map((e) => `<button class="item ${e.estado === 'ANULADO' ? 'anulado' : ''}" data-i="${S.elementos.indexOf(e)}">
+      ${miniTipo(e.tipo, e.estado === 'ANULADO' ? '#9e9e9e' : colorTipo(e.tipo))}
+      <span><span class="t">${esc(e.codigo)}</span><br><span class="s">${esc(e.desc)}${e.obs ? ' · ⚠' : ''}${movido(e) ? ` · expediente: ${fmtProg(e.iniExp)}` : ''}</span></span>
+      <span class="der">${fmtProg(e.ini)}${e.fin != null ? '<br><span class="s">a ' + fmtProg(e.fin) + '</span>' : ''}<br>${etqEstadoElem(e.estado)}${e.pendiente ? ' <span class="etq pend">por enviar</span>' : ''}</span></button>`).join('')
       || '<p class="ayuda">No hay elementos con ese filtro.</p>';
     c.querySelectorAll('.item').forEach((b) => b.onclick = () => {
       const e = S.elementos[+b.dataset.i];
@@ -1123,6 +1377,16 @@ function pantallaElementos() {
     filtro = b.dataset.t || null;
     c.querySelectorAll('#e-tipos button').forEach((x) => x.classList.toggle('sel', x === b));
     pintar();
+  });
+  c.querySelectorAll('#e-vista button').forEach((b) => b.onclick = () => {
+    vista = b.dataset.v;
+    c.querySelectorAll('#e-vista button').forEach((x) => x.classList.toggle('sel', x === b));
+    pintar();
+  });
+  c.querySelector('#e-nuevo')?.addEventListener('click', () => {
+    // en el punto donde estás (en la vía) o donde mira el mapa
+    const m = mapa.getCenter(), u = S.enVia && S.u ? S.u : ubicarLatLon(m.lat, m.lng);
+    editarElemento(null, { prog: u.prog });
   });
   pintar();
 }
@@ -1635,6 +1899,7 @@ function pantallaAyuda() {
       <li>Sin señal también funciona: las observaciones se guardan en el teléfono y se envían solas cuando vuelve internet.</li>
       <li>Lejos de la vía (o con el GPS en pausa), la mira <b>+</b> del centro del mapa te dice la progresiva del punto que mires.</li>
       <li>En el mapa: cuadros de color = elementos de obra (cada tipo con su dibujo), flecha azul = tú, gota = observación, triángulo negro = BM, triángulo azul = punto geodésico (rojo si está observado).</li>
+      <li>Técnicos y administrador: en el elemento, <b>✎ Editar / mover</b> para cambiar su progresiva o lado (con tu GPS o la mira del mapa), su estado o anularlo; en ☰ → Elementos de obra, <b>＋ Nuevo elemento</b>. Cada cambio pide el motivo y el documento y queda en el <b>historial</b>; la ubicación del expediente se ve como un punto gris.</li>
       <li>Toca la vía o la progresiva de arriba para abrir la <b>ficha de esa progresiva</b>: curva, láminas de la sección típica del plano (tócalas para ampliar), paquete estructural, elementos, puntos de control y observaciones cercanas.</li>
       <li>Para ahorrar batería: ☰ → <b>Pausar GPS</b>.</li>
     </ol>
